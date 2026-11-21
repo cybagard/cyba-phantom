@@ -78,10 +78,32 @@
 // word "dot" passes too. So does a dot at the end of the line. So does a
 // space, a TAB or a line break before a non-ASCII character such as U+00B7.
 //
-// A commit with a non-empty encoding header fails, whatever its value. An
-// empty value gives an empty %e, the same as no header, and dco does not fail
-// it. dco reports such a commit as an identity failure ("identity: <hash>"),
-// with its own hint.
+// The header rule. dco reads the header of each commit object: the bytes
+// before the first empty line. A header line is "<key> <value>". A line that
+// starts with one space is a continuation line. A commit that breaks one of
+// these rules fails as an identity failure.
+//   - A key compares exactly, with case. The permitted keys are tree, parent,
+//     author, committer, gpgsig and gpgsig-sha256. Any other key fails.
+//   - A continuation line fails, except in the value of gpgsig or
+//     gpgsig-sha256.
+//   - The order is one tree line, any parent lines, one author line and one
+//     committer line. Then come gpgsig and gpgsig-sha256, each at most once.
+//     Any other count or order fails.
+//   - A tree or parent value is a full hash: 40 or 64 lowercase hex digits.
+//   - An author or committer value has four parts. They are the name, the
+//     address in "<" and ">", digits, and a sign with 4 digits. The sign is
+//     "+" or "-". One space is between the parts, and nothing else. The
+//     name and the address hold no "<" or ">". The name follows the name
+//     rule above. The address follows the author or committer rule above.
+//     dco reads both from the raw line.
+//   - A signature value holds only armor lines. The first line is
+//     "-----BEGIN PGP SIGNATURE-----" or "-----BEGIN SSH SIGNATURE-----".
+//     The matching END line comes later. Between them are only base64
+//     lines and empty lines, and for PGP one checksum line "=XXXX". After
+//     the END line are only empty lines.
+//   - An encoding header fails, whatever its value, also an empty one.
+//
+// A commit with an encoding header gets its own hint, with its identity line.
 //
 // It runs git (the toolchain image ships it). It prints short commit
 // hashes and counts only. It never prints an address, a name, a subject or
@@ -116,8 +138,19 @@ var signoffRE = regexp.MustCompile(`^\S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>$`)
 // addrRE finds each address in a trailer value.
 var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 
-// hashRE matches the full hash that %H prints.
+// hashRE matches a full hash: the %H of a commit, or a tree or parent value.
 var hashRE = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+
+// identLineRE matches the value of an author or committer line: the name, the
+// address, the time and the time zone. The groups are the name and the address.
+var identLineRE = regexp.MustCompile(`^([^<>]*) <([^<>]*)> [0-9]+ [+-][0-9]{4}$`)
+
+// base64RE matches one base64 line of an armor block. armorSumRE matches the
+// checksum line of a PGP armor block.
+var (
+	base64RE   = regexp.MustCompile(`^[A-Za-z0-9+/]+={0,2}$`)
+	armorSumRE = regexp.MustCompile(`^=[A-Za-z0-9+/]{4}$`)
+)
 
 // logFormat asks git for these fields of each commit. They are the hash, the
 // author and committer addresses and names, the encoding header and the
@@ -153,21 +186,23 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 			hashes = append(hashes, string(h))
 		}
 	}
-	msgs, err := rawMessages(dir, hashes)
+	objs, err := rawObjects(dir, hashes)
 	if err != nil {
 		fmt.Fprintf(stderr, "dco: git cat-file failed: %v\n", err)
 		return 2
 	}
-	return check(records, msgs, base, head, stdout, stderr)
+	return check(records, objs, base, head, stdout, stderr)
 }
 
-// rawMessages returns the message of each commit as stored in the object,
-// keyed by full hash. The message starts after the first blank line of the
-// object. A NUL byte and the bytes after it stay in the message.
-func rawMessages(dir string, hashes []string) (map[string][]byte, error) {
-	msgs := make(map[string][]byte, len(hashes))
+// commitObject is a commit as stored in the object: the header and the message.
+type commitObject struct{ header, msg []byte }
+
+// rawObjects returns the header and the message of each commit as stored in
+// the object, keyed by full hash. The message starts after the first blank line
+// of the object. A NUL byte and the bytes after it stay in the message.
+func rawObjects(dir string, hashes []string) (map[string]commitObject, error) {
 	if len(hashes) == 0 {
-		return msgs, nil
+		return map[string]commitObject{}, nil
 	}
 	cmd := exec.Command("git", "-C", dir, "cat-file", "--batch")
 	cmd.Stdin = strings.NewReader(strings.Join(hashes, "\n") + "\n")
@@ -180,8 +215,8 @@ func rawMessages(dir string, hashes []string) (map[string][]byte, error) {
 
 // parseBatch reads n objects from the output of git cat-file --batch. Each
 // object is a header line "<hash> commit <size>", the object and one LF.
-func parseBatch(out []byte, n int) (map[string][]byte, error) {
-	msgs := make(map[string][]byte, n)
+func parseBatch(out []byte, n int) (map[string]commitObject, error) {
+	objs := make(map[string]commitObject, n)
 	for range n {
 		line, rest, ok := bytes.Cut(out, []byte{'\n'})
 		f := strings.Fields(string(line))
@@ -196,11 +231,11 @@ func parseBatch(out []byte, n int) (map[string][]byte, error) {
 			return nil, errors.New("cat-file: short object")
 		}
 		// The object is followed by one LF.
-		_, msg, _ := bytes.Cut(rest[:size], []byte("\n\n"))
-		msgs[f[0]] = msg
+		header, msg, _ := bytes.Cut(rest[:size], []byte("\n\n"))
+		objs[f[0]] = commitObject{header, msg}
 		out = rest[size+1:]
 	}
-	return msgs, nil
+	return objs, nil
 }
 
 // splitRecords splits the output of git log into records. Git ends every
@@ -213,9 +248,9 @@ func splitRecords(out []byte) [][]byte {
 	return records
 }
 
-// check applies the rules to each record of the output of git log. msgs holds
-// the raw message of each commit, keyed by full hash.
-func check(records [][]byte, msgs map[string][]byte, base, head string, stdout, stderr io.Writer) int {
+// check applies the rules to each record of the output of git log. objs holds
+// the raw header and message of each commit, keyed by full hash.
+func check(records [][]byte, objs map[string]commitObject, base, head string, stdout, stderr io.Writer) int {
 	// A record is the fields H, AE, CE, AN, CN, E and TRAILERS. A NUL ends
 	// each field. The NUL+LF that ends the record is not in it. Git joins
 	// the trailers with LF. An unfolded trailer holds no LF and no NUL.
@@ -239,11 +274,13 @@ func check(records [][]byte, msgs map[string][]byte, base, head string, stdout, 
 			unsigned++
 			fmt.Fprintf(stdout, "unsigned: %s\n", hash)
 		}
-		encoded := len(f[5]) > 0
-		// A commit with no raw message fails: dco cannot check it.
-		msg, haveMsg := msgs[full]
+		// A commit with no raw object fails: dco cannot check it. A non-empty
+		// %e needs an encoding header, so it also counts as one.
+		obj, haveObj := objs[full]
+		headerGood, encoded := headerOK(obj.header)
+		encoded = encoded || len(f[5]) > 0
 		identityBad := !identityOK(string(f[1]), string(f[2]), trailers) ||
-			!nameOK(string(f[3])) || !nameOK(string(f[4])) || !haveMsg || !messageOK(msg)
+			!nameOK(string(f[3])) || !nameOK(string(f[4])) || !haveObj || !headerGood || !messageOK(obj.msg)
 		if encoded || identityBad {
 			badID++
 			fmt.Fprintf(stdout, "identity: %s\n", hash)
@@ -276,6 +313,129 @@ func check(records [][]byte, msgs map[string][]byte, base, head string, stdout, 
 	}
 	fmt.Fprintf(stdout, "dco: all %d commits in %s..%s carry Signed-off-by and pass the identity rule\n", total, base, head)
 	return 0
+}
+
+// headerRank gives each permitted key its place in the order of the header.
+var headerRank = map[string]int{
+	"tree": 0, "parent": 1, "author": 2, "committer": 3, "gpgsig": 4, "gpgsig-sha256": 4,
+}
+
+// isSigKey reports whether key is a signature key. Only its value can have
+// continuation lines.
+func isSigKey(key string) bool { return key == "gpgsig" || key == "gpgsig-sha256" }
+
+// headerField is one header line with its continuation lines. lines holds the
+// value, then each continuation line without its first space.
+type headerField struct {
+	key   string
+	lines []string
+}
+
+// parseHeader splits a header into fields. It reports false for a line that
+// has no space, and for a continuation line outside a signature value.
+func parseHeader(header []byte) ([]headerField, bool) {
+	var fields []headerField
+	for _, line := range strings.Split(string(header), "\n") {
+		if rest, ok := strings.CutPrefix(line, " "); ok {
+			n := len(fields)
+			if n == 0 || !isSigKey(fields[n-1].key) {
+				return nil, false
+			}
+			fields[n-1].lines = append(fields[n-1].lines, rest)
+			continue
+		}
+		key, value, ok := strings.Cut(line, " ")
+		if !ok {
+			return nil, false
+		}
+		fields = append(fields, headerField{key, []string{value}})
+	}
+	return fields, true
+}
+
+// headerOK applies the header rule to the header of a commit object. It also
+// reports whether the header has an encoding header. That header alone does not
+// make the first result false: check reports it with its own hint.
+func headerOK(header []byte) (ok, encoded bool) {
+	fields, parsed := parseHeader(header)
+	if !parsed {
+		return false, false
+	}
+	ok = true
+	rank, seen := 0, map[string]int{}
+	for _, f := range fields {
+		if f.key == "encoding" {
+			encoded = true
+			continue
+		}
+		r, known := headerRank[f.key]
+		if !known || r < rank {
+			ok = false
+			continue
+		}
+		rank = r
+		seen[f.key]++
+		ok = ok && fieldOK(f) && (seen[f.key] == 1 || f.key == "parent")
+	}
+	return ok && seen["tree"] == 1 && seen["author"] == 1 && seen["committer"] == 1, encoded
+}
+
+// fieldOK applies the rule for the value of one permitted header field.
+func fieldOK(f headerField) bool {
+	switch f.key {
+	case "tree", "parent":
+		return hashRE.MatchString(f.lines[0])
+	case "author":
+		return identLineOK(f.lines[0], false)
+	case "committer":
+		return identLineOK(f.lines[0], true)
+	}
+	return sigOK(f.lines)
+}
+
+// identLineOK reports whether an author or committer value is good. It has the
+// right form. Its name passes the name rule. Its address is permitted.
+func identLineOK(value string, committer bool) bool {
+	m := identLineRE.FindStringSubmatch(value)
+	if m == nil {
+		return false
+	}
+	addr := m[2]
+	return nameOK(m[1]) && (asciiEqualFold(addr, maintainerAddr) ||
+		committer && asciiEqualFold(addr, githubAddr))
+}
+
+// sigOK reports whether the lines of a signature value are one armor block.
+// The block has a BEGIN line, then base64 lines and empty lines. PGP can also
+// have one checksum line. Then comes the END line, and then only empty lines.
+func sigOK(lines []string) bool {
+	kind := ""
+	switch lines[0] {
+	case "-----BEGIN PGP SIGNATURE-----":
+		kind = "PGP"
+	case "-----BEGIN SSH SIGNATURE-----":
+		kind = "SSH"
+	default:
+		return false
+	}
+	end := "-----END " + kind + " SIGNATURE-----"
+	ended, summed := false, false
+	for _, l := range lines[1:] {
+		switch {
+		case ended:
+			if l != "" {
+				return false
+			}
+		case l == end:
+			ended = true
+		case l == "" || base64RE.MatchString(l):
+		case kind == "PGP" && !summed && armorSumRE.MatchString(l):
+			summed = true
+		default:
+			return false
+		}
+	}
+	return ended
 }
 
 // splitTrailer splits an unfolded "Key: value" trailer line.

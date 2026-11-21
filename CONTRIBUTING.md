@@ -31,10 +31,15 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    word fail the "@", also after spaces or one line break. A byte that is
    not ASCII cannot follow the maintainer address, a mention or a version.
    Any other "@" fails the check. The author name and the committer name
-   follow the same character list and hold no "@". The header comment of
-   `tools/dco/main.go` gives the full rules, with the forms that fail by
-   design and the known limits. It also covers the rule for the encoding
-   header. A commit that fails one of these rules fails the check.
+   follow the same character list and hold no "@". The check also reads
+   the header of the commit object. The permitted keys are `tree`,
+   `parent`, `author`, `committer`, `gpgsig` and `gpgsig-sha256`. Their
+   count and order are fixed, and the `author` and `committer` lines
+   have only the name, the address, the time and the time zone. A
+   signature holds only armor lines. An `encoding` header fails, also
+   with an empty value. The header comment of `tools/dco/main.go` gives
+   the full rules, with the forms that fail by design and the known
+   limits. A commit that fails one of these rules fails the check.
    An outside contributor forks, branches, commits with `git commit -s`,
    and opens a pull request. An outside contributor commits with their
    own name and address, never with the maintainer address. The `dco`

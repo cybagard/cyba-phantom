@@ -348,22 +348,26 @@ func TestFailHintMatchesFailure(t *testing.T) {
 // trailer.
 const goodRecord = "0123456789abcdef\x00" + me + "\x00" + me + "\x00t\x00t\x00\x00Signed-off-by: t <" + me + ">\x00\n"
 
-// goodMsgs holds an empty raw message for each hash that the records of these
-// tests use.
-var goodMsgs = map[string][]byte{"0123456789abcdef": {}, "fedcba9876543210": {}}
+// goodObjs holds a good header and an empty raw message for each hash that the
+// records of these tests use.
+var goodObjs = map[string]commitObject{
+	"0123456789abcdef": {header: []byte(stdHeader)},
+	"fedcba9876543210": {header: []byte(stdHeader)},
+}
 
 // A commit with no raw message fails, and so does one whose message is not
 // valid UTF-8. Both are identity failures, never a pass. The output holds no
 // address.
 func TestCheckFailsClosed(t *testing.T) {
-	for name, msgs := range map[string]map[string][]byte{
+	for name, objs := range map[string]map[string]commitObject{
 		"nil map":      nil,
-		"other hash":   {"fedcba9876543210": {}},
-		"invalid text": {"0123456789abcdef": []byte("a\xffb\n")},
+		"other hash":   {"fedcba9876543210": {header: []byte(stdHeader)}},
+		"invalid text": {"0123456789abcdef": {header: []byte(stdHeader), msg: []byte("a\xffb\n")}},
+		"no header":    {"0123456789abcdef": {}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := check(splitRecords([]byte(goodRecord)), msgs, "base", "HEAD", &stdout, &stderr)
+			code := check(splitRecords([]byte(goodRecord)), objs, "base", "HEAD", &stdout, &stderr)
 			if code != 1 || !strings.Contains(stdout.String(), "identity: 0123456789ab\n") {
 				t.Fatalf("check = %d, want 1 with an identity line; stdout %q", code, stdout.String())
 			}
@@ -386,7 +390,7 @@ func TestMalformedRecordIsError(t *testing.T) {
 	for name, out := range cases {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := check(splitRecords([]byte(out)), goodMsgs, "base", "HEAD", &stdout, &stderr); code != 2 {
+			if code := check(splitRecords([]byte(out)), goodObjs, "base", "HEAD", &stdout, &stderr); code != 2 {
 				t.Fatalf("check = %d, want 2; stdout %q", code, stdout.String())
 			}
 			if got, want := stderr.String(), "dco: malformed git log record\n"; got != want {
@@ -402,7 +406,7 @@ func TestMalformedRecordIsError(t *testing.T) {
 // A well-formed record passes.
 func TestCheckGoodRecord(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := check(splitRecords([]byte(goodRecord)), goodMsgs, "base", "HEAD", &stdout, &stderr); code != 0 {
+	if code := check(splitRecords([]byte(goodRecord)), goodObjs, "base", "HEAD", &stdout, &stderr); code != 0 {
 		t.Fatalf("check = %d, want 0; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -411,7 +415,7 @@ func TestCheckGoodRecord(t *testing.T) {
 func TestCheckKeepsLastRecordWithoutEnd(t *testing.T) {
 	unsigned := "0123456789abcdef\x00" + me + "\x00" + me + "\x00t\x00t\x00\x00\x00"
 	var stdout, stderr bytes.Buffer
-	if code := check(splitRecords([]byte(unsigned)), goodMsgs, "base", "HEAD", &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "unsigned: 0123456789ab\n") {
+	if code := check(splitRecords([]byte(unsigned)), goodObjs, "base", "HEAD", &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "unsigned: 0123456789ab\n") {
 		t.Errorf("check = %d, want 1 with an unsigned line; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -427,7 +431,7 @@ func TestCheckCountsRecords(t *testing.T) {
 		{"one unsigned", goodRecord + unsigned, "dco FAIL: of 2 commits in base..HEAD, 1 lack", 1},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := check(splitRecords([]byte(c.out)), goodMsgs, "base", "HEAD", &stdout, &stderr); code != c.code || !strings.Contains(stdout.String(), c.want) {
+		if code := check(splitRecords([]byte(c.out)), goodObjs, "base", "HEAD", &stdout, &stderr); code != c.code || !strings.Contains(stdout.String(), c.want) {
 			t.Errorf("%s: check = %d, stdout %q, stderr %q; want %d and %q", c.name, code, stdout.String(), stderr.String(), c.code, c.want)
 		}
 	}
@@ -452,14 +456,28 @@ func TestASCIIEqualFoldRefusesHighByte(t *testing.T) {
 // commit and the branch "forged" the new one.
 func forgeCommit(t *testing.T, extra, msg string, flags ...string) (dir, hash string) {
 	t.Helper()
+	return forgeRaw(t, forgeHeader+extra, msg, flags...)
+}
+
+// ident is a valid author or committer value. stdHeader is a valid header with
+// fixed hashes. forgeHeader is the same header for forgeRaw, and it ends in LF.
+const (
+	ident       = "t <" + me + "> 1700000000 +0000"
+	hex40       = "0123456789abcdef0123456789abcdef01234567"
+	stdHeader   = "tree " + hex40 + "\nparent " + hex40 + "\nauthor " + ident + "\ncommitter " + ident
+	forgeHeader = "tree TREE\nparent PARENT\nauthor " + ident + "\ncommitter " + ident + "\n"
+)
+
+// forgeRaw is forgeCommit with the whole header text. In header, TREE and
+// PARENT stand for the tree and the parent of the base commit.
+func forgeRaw(t *testing.T, header, msg string, flags ...string) (dir, hash string) {
+	t.Helper()
 	dir = newRepo(t)
 	commit(t, dir, "base", true)
 	git(t, dir, "branch", "base")
 	tree := strings.TrimSpace(git(t, dir, "rev-parse", "HEAD^{tree}"))
 	parent := strings.TrimSpace(git(t, dir, "rev-parse", "HEAD"))
-	ident := "t <" + me + "> 1700000000 +0000"
-	obj := "tree " + tree + "\nparent " + parent + "\nauthor " + ident + "\ncommitter " + ident + "\n" +
-		extra + "\n" + msg
+	obj := strings.NewReplacer("TREE", tree, "PARENT", parent).Replace(header) + "\n" + msg
 	cmd := exec.Command("git", append([]string{"-C", dir, "hash-object", "-t", "commit", "-w", "--stdin"}, flags...)...)
 	cmd.Stdin = strings.NewReader(obj)
 	out, err := cmd.CombinedOutput()
@@ -473,8 +491,7 @@ func forgeCommit(t *testing.T, extra, msg string, flags ...string) (dir, hash st
 
 // Git converts the message to UTF-8 from the encoding header. The bytes of
 // an address can then come out as other characters, so dco cannot see the
-// address. A commit with a non-empty encoding header fails. An empty value
-// gives an empty %e, and that commit passes.
+// address. A commit with an encoding header fails, also with an empty value.
 func TestEncodingHeaderFails(t *testing.T) {
 	const hint = "hint: commits must not set an encoding header\n"
 	t.Run("ISO-2022-JP hides an address", func(t *testing.T) {
@@ -506,13 +523,19 @@ func TestEncodingHeaderFails(t *testing.T) {
 			t.Errorf("an encoding-only failure shows the address hint; output %q", out)
 		}
 	})
-	t.Run("empty value", func(t *testing.T) {
-		// An empty value gives an empty %e, the same as no header.
-		dir, _ := forgeCommit(t, "encoding \n", signoff)
-		if code, out, _ := runDCO([]string{"base", "forged"}, dir); code != 0 {
-			t.Fatalf("run = %d, want 0; output %q", code, out)
-		}
-	})
+	// Git shows an empty %e for an empty value, so only the header shows it.
+	for name, extra := range map[string]string{
+		"empty value":          "encoding \n",
+		"two encoding headers": "encoding \nencoding UTF-7\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, hash := forgeCommit(t, extra, signoff)
+			code, out, _ := runDCO([]string{"base", "forged"}, dir)
+			if code != 1 || !strings.Contains(out, "identity: "+hash[:12]+"\n") || !strings.Contains(out, hint) {
+				t.Fatalf("run = %d, want 1 with an identity line and the encoding hint; output %q", code, out)
+			}
+		})
+	}
 }
 
 // A line that holds only whitespace separates paragraphs, as in git.
@@ -1011,7 +1034,7 @@ func TestCatFileFailureIsError(t *testing.T) {
 }
 
 // The reader of git cat-file output refuses a malformed header or size.
-// rawMessages refuses a repository that git cannot read.
+// rawObjects refuses a repository that git cannot read.
 func TestRawMessagesErrors(t *testing.T) {
 	for name, out := range map[string]string{
 		"no LF":        "abc commit 4",
@@ -1028,23 +1051,197 @@ func TestRawMessagesErrors(t *testing.T) {
 			}
 		})
 	}
-	if _, err := rawMessages(t.TempDir(), []string{strings.Repeat("a", 40)}); err == nil {
-		t.Error("rawMessages accepts a directory that is not a repository")
+	if _, err := rawObjects(t.TempDir(), []string{strings.Repeat("a", 40)}); err == nil {
+		t.Error("rawObjects accepts a directory that is not a repository")
 	}
 }
 
 // The reader accepts an empty object and an object that ends exactly at the
-// output. It refuses a body one byte short of the object and its LF.
+// output. It splits the header from the message at the first empty line. It
+// refuses a body one byte short of the object and its LF.
 func TestParseBatchSizes(t *testing.T) {
 	got, err := parseBatch([]byte("a commit 0\n\nb commit 6\nh\n\nmsg\n"), 2)
-	if err != nil || len(got) != 2 || len(got["a"]) != 0 || string(got["b"]) != "msg" {
-		t.Errorf("parseBatch = %q, %v; want a empty and b msg", got, err)
+	if err != nil || len(got) != 2 || len(got["a"].msg) != 0 || string(got["b"].msg) != "msg" || string(got["b"].header) != "h" {
+		t.Errorf("parseBatch = %q, %v; want a empty and b with header h and msg", got, err)
 	}
 	if _, err := parseBatch([]byte("a commit 3\nxxx"), 1); err == nil {
 		t.Error("parseBatch accepts an object without its LF")
 	}
 	if _, err := parseBatch([]byte("a commit 3\nxxx\n"), 1); err != nil {
 		t.Errorf("parseBatch refuses an object with its LF: %v", err)
+	}
+}
+
+// hdr is a header with the given author and committer values.
+func hdr(author, committer string) string {
+	return "tree TREE\nparent PARENT\nauthor " + author + "\ncommitter " + committer + "\n"
+}
+
+// armor is a signature field: the key and the first line, then each of lines
+// as a continuation line.
+func armor(first string, lines ...string) string {
+	s := first + "\n"
+	for _, l := range lines {
+		s += " " + l + "\n"
+	}
+	return s
+}
+
+// pgpSig is the PGP signature form of a GitHub squash merge. The signature
+// does not verify here.
+var pgpSig = armor("gpgsig -----BEGIN PGP SIGNATURE-----", "",
+	"wsFcBAABCAAQBQJq/wVKCRC1aQ7uu5UhlAAA7RAQAH4d4X1OCFylKz/0zCIFXap1",
+	"MbhFsFbCdZPqUual1LYCD7NxxHKdqxLz+Bb+eebqQlwNMYnUwG6iIs7KG1FcwQUK",
+	"vTWSYSJ4+DxonYAkYwFu", "=NV1v", "-----END PGP SIGNATURE-----", "")
+
+// sshSig is the signature form of an SSH-signed commit.
+var sshSig = armor("gpgsig -----BEGIN SSH SIGNATURE-----",
+	"U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgq8uVq7y0TBmXzP3dD0bX",
+	"AAAAB2dpdC1zaWcAAAAAAAAABnNoYTUxMgAAAFMAAAALc3NoLWVkMjU1MTkAAABA",
+	"-----END SSH SIGNATURE-----")
+
+// githubHeader is the header of a squash merge by GitHub, with a PGP signature.
+var githubHeader = hdr("cybagard labs <"+me+"> 1795097930 +0100",
+	"GitHub <noreply@github.com> 1795097930 +0100") + pgpSig
+
+// failsHeader forges a commit with the header. Git checks the object unless
+// flags has --literally. It expects exit 1, an identity line and no "@" in the
+// output.
+func failsHeader(t *testing.T, header string, flags ...string) {
+	t.Helper()
+	dir, hash := forgeRaw(t, header, signoff, flags...)
+	code, out, errOut := runDCO([]string{"base", "forged"}, dir)
+	if code != 1 || !strings.Contains(out, "identity: "+hash[:12]+"\n") {
+		t.Fatalf("run = %d, want 1 with an identity line; output %q %q", code, out, errOut)
+	}
+	if strings.Contains(out+errOut, "@") {
+		t.Errorf("the output shows an address: %q %q", out, errOut)
+	}
+}
+
+// A header with an extra key, a wrong count or order, or a signature with other
+// lines fails. Git accepts the forms in the first group.
+func TestHeaderFails(t *testing.T) {
+	lit := "--literally"
+	forged := "cybagard <" + me + "> alice@example.com <x@y.z> 1700000000 +0000"
+	pgp := func(lines ...string) string {
+		return forgeHeader + armor("gpgsig -----BEGIN PGP SIGNATURE-----", lines...)
+	}
+	end := "-----END PGP SIGNATURE-----"
+	for name, header := range map[string]string{
+		"x-note key":     forgeHeader + "x-note <" + other + ">\n",
+		"mergetag key":   forgeHeader + armor("mergetag object TREE", "type commit", "tagger t <"+other+"> 1 +0000", "", "tag"),
+		"key in a case":  forgeHeader + "GPGSIG x\n",
+		"second tree":    forgeHeader + "tree TREE\n",
+		"address line":   pgp("", "alice@example.com", end),
+		"Comment line":   pgp("Comment: hello", end),
+		"Version line":   pgp("Version: GnuPG v1", end),
+		"tagger line":    pgp("tagger t <"+other+"> 1 +0000", end),
+		"no END line":    pgp("", "abcd"),
+		"text after END": pgp("", end, "abcd"),
+		"second END":     pgp("", end, end),
+		"two checksums":  pgp("=abcd", "=abcd", end),
+		"no armor":       forgeHeader + "gpgsig alice\n",
+		"SSH checksum":   forgeHeader + armor("gpgsig -----BEGIN SSH SIGNATURE-----", "=abcd", "-----END SSH SIGNATURE-----"),
+		"mixed armor":    forgeHeader + armor("gpgsig -----BEGIN SSH SIGNATURE-----", end),
+		"two signatures": forgeHeader + pgpSig + pgpSig,
+	} {
+		t.Run(name, func(t *testing.T) { failsHeader(t, header) })
+	}
+	for name, header := range map[string]string{
+		"forged author line":      hdr(forged, ident),
+		"forged committer line":   hdr(ident, forged),
+		"text after the zone":     hdr(ident+" alice@example.com", ident),
+		"text before the date":    hdr("t <"+me+"> x 1700000000 +0000", ident),
+		"no time zone":            hdr("t <"+me+"> 1700000000", ident),
+		"two author lines":        "tree TREE\nparent PARENT\nauthor t <" + other + "> 1700000000 +0000\nauthor " + ident + "\ncommitter " + ident + "\n",
+		"two committer lines":     hdr(ident, ident) + "committer " + ident + "\n",
+		"committer first":         "tree TREE\nparent PARENT\ncommitter " + ident + "\nauthor " + ident + "\n",
+		"no committer":            "tree TREE\nparent PARENT\nauthor " + ident + "\n",
+		"parent after author":     "tree TREE\nauthor " + ident + "\nparent PARENT\ncommitter " + ident + "\n",
+		"signature before author": "tree TREE\nparent PARENT\n" + pgpSig + "author " + ident + "\ncommitter " + ident + "\n",
+		"continuation":            forgeHeader + " more\n",
+		"continuation, author":    hdr(ident+"\n more", ident),
+		"upper case hash":         strings.Replace(forgeHeader, "tree TREE", "tree "+strings.ToUpper(hex40), 1),
+		"line without a space":    forgeHeader + "x\n",
+	} {
+		t.Run(name, func(t *testing.T) { failsHeader(t, header, lit) })
+	}
+}
+
+// These headers pass: a real GitHub header, an SSH signature, the key
+// gpgsig-sha256, a root commit and a merge commit.
+func TestHeaderPasses(t *testing.T) {
+	sha := strings.Replace(pgpSig, "gpgsig ", "gpgsig-sha256 ", 1)
+	for name, header := range map[string]string{
+		"GitHub PGP object":    githubHeader,
+		"SSH signature":        forgeHeader + sshSig,
+		"signature key sha256": forgeHeader + sha,
+		"both signatures":      forgeHeader + sha + pgpSig,
+		"root commit":          "tree TREE\nauthor " + ident + "\ncommitter " + ident + "\n",
+		"merge commit":         "tree TREE\nparent PARENT\nparent PARENT\nauthor " + ident + "\ncommitter " + ident + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, _ := forgeRaw(t, header, signoff, "--literally")
+			code, out, errOut := runDCO([]string{"base", "forged"}, dir)
+			if code != 0 || strings.Contains(out+errOut, "@") {
+				t.Fatalf("run = %d, want 0 and no address; output %q %q", code, out, errOut)
+			}
+		})
+	}
+}
+
+// The author and committer values follow the form, the name rule and the
+// address rule, whatever git log shows.
+func TestIdentLineOK(t *testing.T) {
+	const gh = "GitHub <noreply@github.com> 1 -0700"
+	for _, c := range []struct {
+		value     string
+		committer bool
+		want      bool
+	}{
+		{"t <" + me + "> 1 +0000", false, true},
+		{" <" + me + "> 1 +0000", false, true},
+		{"t <" + strings.ToUpper(me) + "> 1 +0000", false, true},
+		{gh, true, true},
+		{gh, false, false},
+		{"t <" + other + "> 1 +0000", true, false},
+		{"t <" + other + "> 1 +0000", false, false},
+		{"a@b <" + me + "> 1 +0000", false, false},
+		{"a\xe2\x80\x8bb <" + me + "> 1 +0000", false, false},
+		{"t <" + me + "> 1 +00000", false, false},
+		{"t <" + me + "> 1 0000", false, false},
+		{"t <" + me + "> +0000", false, false},
+		{"t <" + me + ">  1 +0000", false, false},
+		{"t <" + me + "> 1 +0000 ", false, false},
+		{"t<" + me + "> 1 +0000", false, false},
+	} {
+		if got := identLineOK(c.value, c.committer); got != c.want {
+			t.Errorf("identLineOK(%q, %v) = %v, want %v", c.value, c.committer, got, c.want)
+		}
+	}
+}
+
+// A hash of 64 digits passes. These fail: a shorter or longer hash and a parent
+// before the tree. A missing tree, author or committer fails, and so does an
+// empty header. Git refuses to use such objects, so no repository holds them.
+func TestHeaderOKHashes(t *testing.T) {
+	h64 := strings.Repeat("ab", 32)
+	tail := "\nauthor " + ident + "\ncommitter " + ident
+	for header, want := range map[string]bool{
+		"tree " + h64 + "\nparent " + h64 + tail:        true,
+		"tree " + h64 + "0\nparent " + h64 + tail:       false,
+		"tree " + hex40 + "0" + tail:                    false,
+		"tree " + hex40 + "\nparent " + h64[:63] + tail: false,
+		"parent " + hex40 + "\ntree " + hex40 + tail:    false,
+		"tree " + hex40 + "\nauthor " + ident:           false,
+		"tree " + hex40 + "\ncommitter " + ident:        false,
+		"author " + ident + "\ncommitter " + ident:      false,
+		"": false,
+	} {
+		if got, _ := headerOK([]byte(header)); got != want {
+			t.Errorf("headerOK(%q) = %v, want %v", header, got, want)
+		}
 	}
 }
 
