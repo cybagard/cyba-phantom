@@ -177,10 +177,14 @@ func (s *storePart) Drops() store.Drops { return s.drops.Load() }
 // the drain, and the checkpointer. If the state directory, the log or the
 // store does not open, there is no writer. Then the store part is not healthy.
 // start logs a checkpointer that does not start, and Healthy does not show it
-// (see TlogHealthy). After a refused cap, start skips the checkpointer. There
-// is no reopen, retry or restart. The writer takes the counters of q.
+// (see TlogHealthy). After a refused cap, start skips the checkpointer and the
+// retention run. Else the run starts after the checkpointer block, with or
+// without a checkpointer. The run at the start can write a leaf. A leaf before
+// the key check makes the check refuse a new key (SEC-16). There is no reopen,
+// retry or restart. The writer takes the counters of q.
 func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePart {
 	s := &storePart{q: q, dk: session.NewDayKey(), cancel: func() {}, stopSched: func() {}}
+	var run func(context.Context) // the retention run, or nil
 	var err error
 	if s.root, err = os.OpenRoot(p.Root); err != nil {
 		lg.Error("state directory does not open", "error", err)
@@ -213,16 +217,16 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 		}
 		s.wg.Go(func() { s.writer.Run(context.Background()) })
 		if d.schedule != nil {
-			// The refusal is known here, before the goroutine starts. A refused
-			// cap gives no run, not even the run at the start. So the sensor
-			// never runs with the cap off. serve stops on capErr.
-			if run, err := d.schedule(s.writer, p, lg); err != nil {
+			// The refusal is known here, before the run starts. A refused cap
+			// gives no run, not even the run at the start. So the sensor
+			// never runs with the cap off. serve stops on capErr. The run
+			// starts after the checkpointer block: the run at the start
+			// writes a leaf. A leaf before the key check makes the check
+			// refuse a new key.
+			if run, err = d.schedule(s.writer, p, lg); err != nil {
 				lg.Error("retention cap refused", "error", err)
 				s.capErr = err
-			} else {
-				var ctx context.Context
-				ctx, s.stopSched = context.WithCancel(context.Background())
-				s.sched.Go(func() { run(ctx) })
+				run = nil
 			}
 		}
 	} else if s.db == nil {
@@ -234,6 +238,13 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 		if err := s.startCheckpointer(p, d, lg); err != nil {
 			lg.Error("checkpointer does not start", "error", err)
 		}
+	}
+	// The run does not depend on the checkpointer (C8). It starts also when the
+	// checkpointer did not start.
+	if run != nil {
+		var ctx context.Context
+		ctx, s.stopSched = context.WithCancel(context.Background())
+		s.sched.Go(func() { run(ctx) })
 	}
 	return s
 }
