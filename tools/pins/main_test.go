@@ -40,6 +40,12 @@ func baseFiles() files {
 	}
 }
 
+// secondJob returns a second job of ci.yml that runs in the given image. It
+// comes after the job of baseFiles, so its image line is line 11.
+func secondJob(image string) string {
+	return "  other:\n    container:\n      image: " + image + "\n"
+}
+
 // edit replaces the first old text in a file. It fails the test when the
 // text is not there, so a test never passes because an edit did nothing.
 func (f files) edit(t *testing.T, name, old, repl string) {
@@ -111,6 +117,9 @@ func TestAgreeingVariants(t *testing.T) {
 			f[makeFile] += "# GOTOOLCHAIN := go1.0.0\n\t# export GOTOOLCHAIN\n  # unexport GOTOOLCHAIN\n"
 			f[ciFile] += "  # image: x\n\t# container: golang:1.0.0\n    # uses: docker://x\n    # GOTOOLCHAIN: go1.0.0\n"
 			f[dockerFile] += "# ENV GOTOOLCHAIN=go1.0.0\n  # FROM scratch\n"
+		},
+		"second job with the same image": func(t *testing.T, f files) {
+			f[ciFile] += secondJob("golang:1.27.3@sha256:" + digestA)
 		},
 		"backslash line before a line without a key word": func(t *testing.T, f files) {
 			f[makeFile] += "FOO := bar \\\nBAZ := 1\n"
@@ -248,14 +257,41 @@ func TestDisagreement(t *testing.T) {
 			mod: func(t *testing.T, f files) {
 				f.edit(t, ciFile, "    container:\n", "    container:\n    container:\n")
 			},
-			want: []string{"ci.yml:8: 2 container lines (lines [7 8]), one allowed"},
+			want: []string{"ci.yml: 2 container lines and 1 image lines, the numbers must be equal"},
 		},
 		{
 			name: "second image line at a deeper indent",
 			mod: func(t *testing.T, f files) {
 				f.edit(t, ciFile, "    container:\n", "    services:\n          image: golang:1.27.3\n    container:\n")
 			},
-			want: []string{"ci.yml:10: 2 image lines (lines [8 10]), one allowed"},
+			want: []string{
+				"ci.yml: 1 container lines and 2 image lines, the numbers must be equal",
+				fmt.Sprintf("%s:8: image %q is not the image %q of %s:2",
+					ciFile, "golang:1.27.3", image(digestA), dockerFile),
+			},
+		},
+		{
+			name: "second job with an image of another digest",
+			mod: func(t *testing.T, f files) {
+				f[ciFile] += secondJob("golang:1.27.3@sha256:" + digestB)
+			},
+			want: []string{fmt.Sprintf("%s:11: image %q is not the image %q of %s:2",
+				ciFile, image(digestB), image(digestA), dockerFile)},
+		},
+		{
+			name: "second job with an image of another tag",
+			mod: func(t *testing.T, f files) {
+				f[ciFile] += secondJob("golang:1.27.2@sha256:" + digestA)
+			},
+			want: []string{fmt.Sprintf("%s:11: image %q is not the image %q of %s:2",
+				ciFile, "golang:1.27.2@sha256:"+digestA, image(digestA), dockerFile)},
+		},
+		{
+			name: "second job with a container line and no image line",
+			mod: func(t *testing.T, f files) {
+				f[ciFile] += "  other:\n    container:\n"
+			},
+			want: []string{"ci.yml: 2 container lines and 1 image lines, the numbers must be equal"},
 		},
 		{
 			name: "second FROM line",

@@ -8,7 +8,9 @@
 // Run it in the repository root. It reads four files. In each file, a word
 // line is a line that holds a key word. A comment line is not a word line.
 // Each word line must be equal to one allowed line of that file. Each
-// allowed line must be in the file once. Any other word line is a failure.
+// allowed line must be in the file once. The "container:" and "image:"
+// lines of ci.yml are the exception: each must be in the file once or more.
+// Any other word line is a failure.
 //
 // The files, the key words, and the allowed lines are:
 //   - go.mod: the first field is "go" or "toolchain". The allowed lines are
@@ -26,8 +28,9 @@
 //     "FROM golang:<v>@sha256:<64 hex digits>".
 //
 // The version in go.mod, in the Makefile, in ci.yml and in the Dockerfile
-// tag must be the same. The image string of the FROM line must be the same
-// as the image string of ci.yml.
+// tag must be the same. Each image line of ci.yml must hold the image string
+// of the FROM line. In ci.yml, the number of container lines must equal the
+// number of image lines.
 //
 // A missing file is a failure. A missing allowed line is a failure. A
 // second allowed line is a failure. A word line of another form is a
@@ -68,12 +71,13 @@ const (
 )
 
 // allowed is one line that a word line may be. The line must be in the file
-// once, or at most once when optional is set. The groups of re hold the
-// values that check compares.
+// once. With optional set, it may be missing. With many set, it may be in the
+// file more than once. The groups of re hold the values that check compares.
 type allowed struct {
 	what     string
 	re       *regexp.Regexp
 	optional bool
+	many     bool
 }
 
 // rule is the allow list of one file. A line that starts with the comment
@@ -97,7 +101,8 @@ func (r rule) isComment(l string) bool {
 const (
 	goLine, toolchainLine = 0, 1
 	makeAssign            = 0
-	ciEnv, ciImage        = 0, 2
+	ciEnv, ciContainer    = 0, 1
+	ciImage               = 2
 	dockerFrom            = 0
 
 	versionGroup     = 1
@@ -130,14 +135,14 @@ var rules = map[string]rule{
 			return f == "go" || f == "toolchain"
 		},
 		allowed: []allowed{
-			{"go", regexp.MustCompile(`^go (` + versionRE + `)$`), false},
-			{"toolchain", regexp.MustCompile(`^toolchain go(` + versionRE + `)$`), true},
+			{"go", regexp.MustCompile(`^go (` + versionRE + `)$`), false, false},
+			{"toolchain", regexp.MustCompile(`^toolchain go(` + versionRE + `)$`), true, false},
 		}},
 	makeFile: {comment: "#", joins: true, joined: true,
 		word: hasWord("GOTOOLCHAIN"),
 		allowed: []allowed{
-			{"GOTOOLCHAIN assignment", regexp.MustCompile(`^GOTOOLCHAIN := go(` + versionRE + `)$`), false},
-			{"export GOTOOLCHAIN", regexp.MustCompile(`^export GOTOOLCHAIN$`), false},
+			{"GOTOOLCHAIN assignment", regexp.MustCompile(`^GOTOOLCHAIN := go(` + versionRE + `)$`), false, false},
+			{"export GOTOOLCHAIN", regexp.MustCompile(`^export GOTOOLCHAIN$`), false, false},
 		}},
 	ciFile: {comment: "#",
 		word: func(l string) bool {
@@ -145,16 +150,16 @@ var rules = map[string]rule{
 				strings.Contains(strings.ToLower(l), "image")
 		},
 		allowed: []allowed{
-			{"GOTOOLCHAIN", regexp.MustCompile(`^  GOTOOLCHAIN: go(` + versionRE + `)$`), false},
-			{"container", regexp.MustCompile(`^ +container:$`), false},
-			{"image", regexp.MustCompile(`^ +image: (\S+)$`), false},
+			{"GOTOOLCHAIN", regexp.MustCompile(`^  GOTOOLCHAIN: go(` + versionRE + `)$`), false, false},
+			{"container", regexp.MustCompile(`^ +container:$`), false, true},
+			{"image", regexp.MustCompile(`^ +image: (\S+)$`), false, true},
 		}},
 	dockerFile: {comment: "#", joined: true,
 		word: func(l string) bool {
 			return strings.EqualFold(firstField(l), "FROM") || strings.Contains(l, "GOTOOLCHAIN")
 		},
 		allowed: []allowed{
-			{"FROM", regexp.MustCompile(`^FROM (golang:(` + versionRE + `)@` + digestRE + `)$`), false},
+			{"FROM", regexp.MustCompile(`^FROM (golang:(` + versionRE + `)@` + digestRE + `)$`), false, false},
 		}},
 }
 
@@ -198,10 +203,10 @@ func run(dir string, stdout, stderr io.Writer) int {
 // agree.
 func check(dir string) []string {
 	var fails []string
-	goMod := audit(load(dir, goModFile, &fails), rules[goModFile], &fails)
-	mk := audit(load(dir, makeFile, &fails), rules[makeFile], &fails)
-	ci := audit(load(dir, ciFile, &fails), rules[ciFile], &fails)
-	df := audit(load(dir, dockerFile, &fails), rules[dockerFile], &fails)
+	goMod, _ := audit(load(dir, goModFile, &fails), rules[goModFile], &fails)
+	mk, _ := audit(load(dir, makeFile, &fails), rules[makeFile], &fails)
+	ci, ciHits := audit(load(dir, ciFile, &fails), rules[ciFile], &fails)
+	df, _ := audit(load(dir, dockerFile, &fails), rules[dockerFile], &fails)
 
 	goSpot := goMod[goLine]
 	if goSpot.found() {
@@ -210,10 +215,19 @@ func check(dir string) []string {
 		sameVersion(&fails, ci[ciEnv], versionGroup, goSpot)
 		sameVersion(&fails, df[dockerFrom], fromVersionGroup, goSpot)
 	}
-	from, image := df[dockerFrom], ci[ciImage]
-	if from.found() && image.found() && from.sub[imageGroup] != image.sub[imageGroup] {
-		fails = append(fails, fmt.Sprintf("%s: image %q is not the image %q of %s",
-			image, image.sub[imageGroup], from.sub[imageGroup], from))
+	from := df[dockerFrom]
+	if ciHits != nil {
+		containers, images := ciHits[ciContainer], ciHits[ciImage]
+		if len(containers) > 0 && len(images) > 0 && len(containers) != len(images) {
+			fails = append(fails, fmt.Sprintf("%s: %d container lines and %d image lines, the numbers must be equal",
+				ciFile, len(containers), len(images)))
+		}
+		for _, image := range images {
+			if from.found() && from.sub[imageGroup] != image.sub[imageGroup] {
+				fails = append(fails, fmt.Sprintf("%s: image %q is not the image %q of %s",
+					image, image.sub[imageGroup], from.sub[imageGroup], from))
+			}
+		}
 	}
 	return fails
 }
@@ -260,11 +274,13 @@ func readLimited(path string) ([]byte, error) {
 // when there are two or more. Each failure adds one text. A source that
 // failed to load gives empty spots and no failure, because load reported it.
 // A missing line is not reported when the file has a word line of another
-// form. That line is the failure.
-func audit(src source, r rule, fails *[]string) []spot {
+// form. That line is the failure. An allowed line with many set may be in the
+// file more than once. Its spot is then the first line. The second result
+// holds every line that matched, for each allowed line.
+func audit(src source, r rule, fails *[]string) ([]spot, [][]spot) {
 	spots := make([]spot, len(r.allowed))
 	if !src.ok {
-		return spots
+		return spots, nil
 	}
 	hits := make([][]spot, len(r.allowed))
 	other := false
@@ -305,6 +321,8 @@ func audit(src source, r rule, fails *[]string) []spot {
 			if !a.optional && !other {
 				*fails = append(*fails, fmt.Sprintf("%s: no %s line", src.name, a.what))
 			}
+		case a.many:
+			spots[j] = hits[j][0]
 		case len(hits[j]) > 1:
 			lines := make([]int, len(hits[j]))
 			for k, h := range hits[j] {
@@ -316,5 +334,5 @@ func audit(src source, r rule, fails *[]string) []spot {
 			spots[j] = hits[j][0]
 		}
 	}
-	return spots
+	return spots, hits
 }
