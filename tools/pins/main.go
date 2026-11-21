@@ -28,9 +28,10 @@
 //     "FROM golang:<v>@sha256:<64 hex digits>".
 //
 // The version in go.mod, in the Makefile, in ci.yml and in the Dockerfile
-// tag must be the same. Each image line of ci.yml must hold the image string
+// tag must be the same. Each image line of ci.yml must equal the image string
 // of the FROM line. In ci.yml, the number of container lines must equal the
-// number of image lines.
+// number of image lines. The check compares the two counts of the file.
+// It does not pair a container line with the image line of its job.
 //
 // A missing file is a failure. A missing allowed line is a failure. A
 // second allowed line is a failure. A word line of another form is a

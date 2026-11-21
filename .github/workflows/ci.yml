@@ -11,8 +11,8 @@
 #     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
 #     equal to the go line is stripped by go mod tidy), downloaded with
 #     Go's checksum verification; no setup-go action, zero dependencies;
-#   - one container image: the oracle and coldstart jobs run in golang:1.27.3
-#     from Docker Hub, pinned by digest (the base image of .devcontainer);
+#   - one container image: golang:1.27.3 from Docker Hub, pinned by digest
+#     (the base image of .devcontainer). The oracle and coldstart jobs use it;
 #   - gate checkers (dco, trace, mirror-diff) are built from an explicit
 #     checkout of the PR base branch (a ref-less checkout on
 #     pull_request would yield the merge ref — the PR's own changes)

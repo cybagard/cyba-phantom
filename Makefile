@@ -186,10 +186,10 @@ fill:
 	echo "fill: the fill tests passed and none skipped"
 
 # T-I-03 (NFR-05): the cold-start test builds the binary and runs it with a
-# state directory at /var/lib/phantom. It needs root and a free /var/lib/phantom.
-# Without them it skips. The coldstart job of CI runs it as root in a container.
-# The target is not part of all. It fails when go test fails, a test skips or
-# the named test lacks a PASS line.
+# state directory at /var/lib/phantom. It needs root and a free
+# /var/lib/phantom. Without them it skips. The coldstart job of CI runs it as
+# root in a container. The target is not part of all. It fails when go test
+# fails, a test skips or the named test lacks a PASS line.
 COLDSTART_TEST := TestTI03_ColdStartBinary
 coldstart:
 	@log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
