@@ -536,9 +536,9 @@ func TestTS14_ConsistencyKeyHash(t *testing.T) {
 	}
 }
 
-// T-S-14: a value with another name and the key hash of key A is not one log
-// with a value of key A. Consistency gives ErrFork in both orders. This holds
-// at size 0 too.
+// T-S-14: take a value with another name and the key hash of key A. It is not
+// one log with a value of key A. Consistency gives ErrFork in both orders. This
+// holds at size 0 too.
 func TestTS14_ConsistencyOriginSameKeyHash(t *testing.T) {
 	sA, textA := newKey(t, origin)
 	vA, _ := ParseKey([]byte(textA))
