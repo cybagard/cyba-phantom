@@ -34,10 +34,14 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    follow the same character list and hold no "@". The check also reads
    the header of the commit object. The permitted keys are `tree`,
    `parent`, `author`, `committer`, `gpgsig` and `gpgsig-sha256`. Their
-   count and order are fixed, and the `author` and `committer` lines
-   have only the name, the address, the time and the time zone. A
-   signature holds only armor lines. An `encoding` header fails, also
-   with an empty value. The header comment of `tools/dco/main.go` gives
+   count and order are fixed. The `author` and `committer` lines
+   have only the name, the address, the time and the time zone, with
+   one space between them. The name is not empty. It does not start or
+   end with a space or a TAB. A signature holds only armor lines. A
+   signature field passes only when the committer is the GitHub
+   committer, so a commit that you sign yourself fails. An `encoding`
+   line fails, also one with an empty value. The header comment of
+   `tools/dco/main.go` gives
    the full rules, with the forms that fail by design and the known
    limits. A commit that fails one of these rules fails the check.
    An outside contributor forks, branches, commits with `git commit -s`,

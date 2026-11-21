@@ -77,6 +77,9 @@
 // Examples are "@dependabot. com", "@context..io" and "@context[.]io". The
 // word "dot" passes too. So does a dot at the end of the line. So does a
 // space, a TAB or a line break before a non-ASCII character such as U+00B7.
+// dco does not verify a signature and does not decode its base64 text. So a
+// signature value can carry data that a reader decodes. A base64 line can be
+// any word of base64 characters. The checksum line can come before them.
 //
 // The header rule. dco reads the header of each commit object: the bytes
 // before the first empty line. A header line is "<key> <value>". A line that
@@ -87,23 +90,30 @@
 //   - A continuation line fails, except in the value of gpgsig or
 //     gpgsig-sha256.
 //   - The order is one tree line, any parent lines, one author line and one
-//     committer line. Then come gpgsig and gpgsig-sha256, each at most once.
-//     Any other count or order fails.
+//     committer line. The gpgsig and gpgsig-sha256 lines come after the
+//     committer line, in any order, each at most once. Any other count or
+//     order fails.
+//   - A gpgsig or gpgsig-sha256 field passes only when the committer
+//     address of the same header is the GitHub committer address, without
+//     case. With the maintainer as committer, a signature field fails.
 //   - A tree or parent value is a full hash: 40 or 64 lowercase hex digits.
-//   - An author or committer value has four parts. They are the name, the
-//     address in "<" and ">", digits, and a sign with 4 digits. The sign is
-//     "+" or "-". One space is between the parts, and nothing else. The
-//     name and the address hold no "<" or ">". The name follows the name
-//     rule above. The address follows the author or committer rule above.
-//     dco reads both from the raw line.
+//   - An author or committer value has this form: the name, one space, "<",
+//     the address, ">", one space, the time, one space and the zone. The
+//     name is not empty. It does not start or end with a space or a TAB.
+//     The name and the address hold no "<" or ">". The time is "0", or up
+//     to 16 digits that do not start with "0". The zone is "+" or "-" and 4
+//     digits. The name passes the character list and holds no "@". The
+//     address follows the identity rule above. dco reads both from the raw
+//     line.
 //   - A signature value holds only armor lines. The first line is
 //     "-----BEGIN PGP SIGNATURE-----" or "-----BEGIN SSH SIGNATURE-----".
 //     The matching END line comes later. Between them are only base64
-//     lines and empty lines, and for PGP one checksum line "=XXXX". After
-//     the END line are only empty lines.
-//   - An encoding header fails, whatever its value, also an empty one.
+//     lines and empty lines, and for PGP at most one checksum line "=XXXX".
+//     After the END line are only empty lines.
+//   - An encoding line fails, whatever its value, also an empty one.
 //
-// A commit with an encoding header gets its own hint, with its identity line.
+// A commit with an encoding line gets its own hint, with its identity line.
+// It gets the hint also when the rest of the header does not parse.
 //
 // It runs git (the toolchain image ships it). It prints short commit
 // hashes and counts only. It never prints an address, a name, a subject or
@@ -143,7 +153,9 @@ var hashRE = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 // identLineRE matches the value of an author or committer line: the name, the
 // address, the time and the time zone. The groups are the name and the address.
-var identLineRE = regexp.MustCompile(`^([^<>]*) <([^<>]*)> [0-9]+ [+-][0-9]{4}$`)
+// The name is not empty and has no space or TAB at its ends. The time is "0" or
+// up to 16 digits with no leading zero.
+var identLineRE = regexp.MustCompile(`^([^<> \t](?:[^<>]*[^<> \t])?) <([^<>]*)> (?:0|[1-9][0-9]{0,15}) [+-][0-9]{4}$`)
 
 // base64RE matches one base64 line of an armor block. armorSumRE matches the
 // checksum line of a PGP armor block.
@@ -153,7 +165,7 @@ var (
 )
 
 // logFormat asks git for these fields of each commit. They are the hash, the
-// author and committer addresses and names, the encoding header and the
+// author and committer addresses and names, the encoding and the
 // trailers. Git's own trailer parser decides what a trailer is. The option
 // `only` drops the lines of the trailer block that are not trailers. So dco
 // accepts only the sign-offs that git recognizes as trailers.
@@ -170,7 +182,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 	}
 	base, head := args[0], args[1]
 
-	cmd := exec.Command("git", "-C", dir, "log", logFormat, base+".."+head)
+	cmd := exec.Command("git", "-C", dir, "log", "--no-show-signature", logFormat, base+".."+head)
 	out, err := cmd.Output()
 	if err != nil {
 		// dco does not print the stderr of git.
@@ -198,7 +210,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 type commitObject struct{ header, msg []byte }
 
 // rawObjects returns the header and the message of each commit as stored in
-// the object, keyed by full hash. The message starts after the first blank line
+// the object, keyed by full hash. The message starts after the first empty line
 // of the object. A NUL byte and the bytes after it stay in the message.
 func rawObjects(dir string, hashes []string) (map[string]commitObject, error) {
 	if len(hashes) == 0 {
@@ -275,7 +287,7 @@ func check(records [][]byte, objs map[string]commitObject, base, head string, st
 			fmt.Fprintf(stdout, "unsigned: %s\n", hash)
 		}
 		// A commit with no raw object fails: dco cannot check it. A non-empty
-		// %e needs an encoding header, so it also counts as one.
+		// %e needs an encoding line, so it also counts as one.
 		obj, haveObj := objs[full]
 		headerGood, encoded := headerOK(obj.header)
 		encoded = encoded || len(f[5]) > 0
@@ -353,19 +365,32 @@ func parseHeader(header []byte) ([]headerField, bool) {
 	return fields, true
 }
 
+// hasEncodingLine reports whether a line of the header has the key "encoding".
+// A continuation line has no key.
+func hasEncodingLine(header []byte) bool {
+	for _, line := range strings.Split(string(header), "\n") {
+		if key, _, ok := strings.Cut(line, " "); ok && key == "encoding" {
+			return true
+		}
+	}
+	return false
+}
+
 // headerOK applies the header rule to the header of a commit object. It also
-// reports whether the header has an encoding header. That header alone does not
-// make the first result false: check reports it with its own hint.
+// reports whether the header has an encoding line, also when the parse fails.
+// That line alone does not make the first result false: check reports it with
+// its own hint.
 func headerOK(header []byte) (ok, encoded bool) {
+	encoded = hasEncodingLine(header)
 	fields, parsed := parseHeader(header)
 	if !parsed {
-		return false, false
+		return false, encoded
 	}
 	ok = true
+	githubCommitter := false
 	rank, seen := 0, map[string]int{}
 	for _, f := range fields {
 		if f.key == "encoding" {
-			encoded = true
 			continue
 		}
 		r, known := headerRank[f.key]
@@ -376,6 +401,13 @@ func headerOK(header []byte) (ok, encoded bool) {
 		rank = r
 		seen[f.key]++
 		ok = ok && fieldOK(f) && (seen[f.key] == 1 || f.key == "parent")
+		switch {
+		case f.key == "committer":
+			m := identLineRE.FindStringSubmatch(f.lines[0])
+			githubCommitter = m != nil && asciiEqualFold(m[2], githubAddr)
+		case isSigKey(f.key):
+			ok = ok && githubCommitter
+		}
 	}
 	return ok && seen["tree"] == 1 && seen["author"] == 1 && seen["committer"] == 1, encoded
 }
@@ -394,7 +426,7 @@ func fieldOK(f headerField) bool {
 }
 
 // identLineOK reports whether an author or committer value is good. It has the
-// right form. Its name passes the name rule. Its address is permitted.
+// right form. Its name passes nameOK. Its address is permitted.
 func identLineOK(value string, committer bool) bool {
 	m := identLineRE.FindStringSubmatch(value)
 	if m == nil {
@@ -508,8 +540,7 @@ func charsOK(s string) bool {
 	return true
 }
 
-// nameOK applies the name rule to an author or committer name: the character
-// list, and no "@".
+// nameOK checks an author or committer name: the character list, and no "@".
 func nameOK(name string) bool {
 	return charsOK(name) && !strings.Contains(name, "@")
 }
