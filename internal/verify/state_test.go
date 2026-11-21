@@ -499,8 +499,9 @@ type otherKey struct {
 	v     note.Verifier
 }
 
-// otherKeys returns the keys with the name of key A and another key hash: a
-// real key, and a key with the key hash of A plus 1 or minus 1.
+// otherKeys returns three keys. Each has the name of key A and another key
+// hash. One is a real key. The two others have the key hash of A plus 1 and
+// minus 1.
 func otherKeys(t testing.TB, hashA uint32) []otherKey {
 	t.Helper()
 	sB, textB := newKey(t, origin)
@@ -536,8 +537,8 @@ func TestTS14_ConsistencyKeyHash(t *testing.T) {
 }
 
 // T-S-14: a value with another name and the key hash of key A is not one log
-// with a value of key A. Consistency gives ErrFork in both orders, also at size
-// 0.
+// with a value of key A. Consistency gives ErrFork in both orders. This holds
+// at size 0 too.
 func TestTS14_ConsistencyOriginSameKeyHash(t *testing.T) {
 	sA, textA := newKey(t, origin)
 	vA, _ := ParseKey([]byte(textA))
@@ -586,7 +587,8 @@ func refuseUpdates(t *testing.T, vA note.Verifier, noteA []byte, label string, o
 		t.Fatal(err)
 	}
 	st.Close()
-	st, err = LoadState(dir, vA, StateOptions{}) // a state that comes from the file
+	// Load the state again, so that it comes from the file.
+	st, err = LoadState(dir, vA, StateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
