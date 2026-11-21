@@ -49,8 +49,8 @@ func mustRead(t *testing.T, name string) []byte {
 	return b
 }
 
-// checkReadmeFacts reports a README that does not hold the key_id and the
-// expires of the manifest, each as a whole line of its own.
+// checkReadmeFacts reports a README without the key_id line or the expires
+// line of the manifest. Each line must match as a whole line.
 func checkReadmeFacts(readme, manifest []byte) error {
 	m, err := readManifest(manifest)
 	if err != nil {
