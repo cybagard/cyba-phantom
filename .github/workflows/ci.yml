@@ -229,6 +229,9 @@ jobs:
     # /var/lib/phantom. The runner user is not root, so the test job skips it.
     # The job runs as root in the container of the oracle job, at the same
     # digest. Bump both with .devcontainer. make coldstart fails on a skip.
+    # The checkout belongs to the runner user, and the test setup refuses a
+    # checkout whose parent directories have another owner. So the job runs
+    # the test in a copy that root owns.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     container:
@@ -236,14 +239,14 @@ jobs:
     steps:
       - *checkout
 
-      - name: Trust the checkout for git
-        # The checkout belongs to another user than root. Then git refuses
-        # it, and go build fails when it stamps the version data. Trust only
-        # this directory, not all directories.
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
       - name: Cold-start test (no skip allowed)
-        run: make coldstart
+        # cp -R, not cp -a, so that root owns the copy. The copy and its
+        # parent directory have no group or other write bit. Git also sees a
+        # repository of the current user, so go build can stamp version data.
+        run: |
+          cp -R "$GITHUB_WORKSPACE" /coldstart
+          cd /coldstart
+          make coldstart
 
   trace:
     # Checker-from-base: the trace tool is built from the PR base branch
