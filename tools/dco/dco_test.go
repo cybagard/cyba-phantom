@@ -14,14 +14,22 @@ const me = "67512030+cybagard@users.noreply.github.com"
 // other is an address the identity rule refuses (reserved test domain).
 const other = "other@example.com"
 
-// isolate makes git ignore the user and system configuration. A user setting
-// then cannot change the output.
-var isolate = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
+// isolate makes git ignore the user and system configuration, and the
+// settings of GIT_CONFIG_COUNT. A user setting then cannot change the output.
+var isolate = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0"}
 
-// TestMain sets isolate for every git that dco runs in the tests.
+// TestMain sets isolate for every git that dco runs in the tests. It also
+// removes GIT_CONFIG_PARAMETERS.
 func TestMain(m *testing.M) {
-	os.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, kv := range isolate {
+		k, v, _ := strings.Cut(kv, "=")
+		if err := os.Setenv(k, v); err != nil {
+			panic(err)
+		}
+	}
+	if err := os.Unsetenv("GIT_CONFIG_PARAMETERS"); err != nil {
+		panic(err)
+	}
 	os.Exit(m.Run())
 }
 
@@ -30,7 +38,7 @@ func TestMain(m *testing.M) {
 func gitEnv(t *testing.T, dir string, env []string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(append(os.Environ(), isolate...), env...)
+	cmd.Env = append(os.Environ(), env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -354,6 +362,28 @@ func TestFailHintMatchesFailure(t *testing.T) {
 	})
 }
 
+// headerHint is the fixed text of the header hint.
+const headerHint = "hint: the header rule fails this commit. A signed commit fails it. See the header of tools/dco/main.go.\n"
+
+// A commit that fails only the header rule gets the header hint and not the
+// identity hint. An identity failure gets the identity hint and not the header
+// hint. Neither hint holds an address or a name.
+func TestHeaderHintMatchesFailure(t *testing.T) {
+	t.Run("header only", func(t *testing.T) {
+		dir, _ := forgeRaw(t, ghHeader+pgpSig, signoff, "--literally")
+		code, out, errOut := runDCO([]string{"base", "forged"}, dir)
+		if code != 1 || !strings.Contains(out, headerHint) || strings.Contains(out, idHint) || strings.Contains(out+errOut, "@") {
+			t.Errorf("want the header hint only; run = %d, output %q %q", code, out, errOut)
+		}
+	})
+	t.Run("identity", func(t *testing.T) {
+		_, out, _ := runOn(t, []string{"GIT_AUTHOR_EMAIL=" + other}, signoff)
+		if !strings.Contains(out, idHint) || strings.Contains(out, headerHint) {
+			t.Errorf("want the identity hint only; output %q", out)
+		}
+	})
+}
+
 // goodRecord is one well-formed git log record. It has the hash, the author
 // and committer addresses and names, an empty encoding and a sign-off
 // trailer.
@@ -491,7 +521,6 @@ func forgeRaw(t *testing.T, header, msg string, flags ...string) (dir, hash stri
 	obj := strings.NewReplacer("TREE", tree, "PARENT", parent).Replace(header) + "\n" + msg
 	cmd := exec.Command("git", append([]string{"-C", dir, "hash-object", "-t", "commit", "-w", "--stdin"}, flags...)...)
 	cmd.Stdin = strings.NewReader(obj)
-	cmd.Env = append(os.Environ(), isolate...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git hash-object: %v\n%s", err, out)
@@ -504,8 +533,8 @@ func forgeRaw(t *testing.T, header, msg string, flags ...string) (dir, hash stri
 // Git converts the message to UTF-8 from the encoding line. The bytes of
 // an address can then come out as other characters, so dco cannot see the
 // address. A commit with an encoding line fails, also with an empty value.
-func TestEncodingHeaderFails(t *testing.T) {
-	const hint = "hint: commits must not set an encoding header\n"
+func TestEncodingLineFails(t *testing.T) {
+	const hint = "hint: commits must not set an encoding line\n"
 	t.Run("ISO-2022-JP hides an address", func(t *testing.T) {
 		// After ESC $ B, the bytes "ma" and "@i" are two kanji. ESC ( B
 		// returns to ASCII.
@@ -1102,29 +1131,22 @@ func armor(first string, lines ...string) string {
 	return s
 }
 
-// pgpSig is the PGP signature form of a GitHub squash merge. The signature
-// does not verify here.
+// pgpSig is the PGP signature form of a commit that GitHub makes. The
+// signature does not verify here.
 var pgpSig = armor("gpgsig -----BEGIN PGP SIGNATURE-----", "",
 	"wsFcBAABCAAQBQJq/wVKCRC1aQ7uu5UhlAAA7RAQAH4d4X1OCFylKz/0zCIFXap1",
 	"MbhFsFbCdZPqUual1LYCD7NxxHKdqxLz+Bb+eebqQlwNMYnUwG6iIs7KG1FcwQUK",
 	"vTWSYSJ4+DxonYAkYwFu", "=NV1v", "-----END PGP SIGNATURE-----", "")
 
-// sshSig is the signature form of an SSH-signed commit.
-var sshSig = armor("gpgsig -----BEGIN SSH SIGNATURE-----",
-	"U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgq8uVq7y0TBmXzP3dD0bX",
-	"AAAAB2dpdC1zaWcAAAAAAAAABnNoYTUxMgAAAFMAAAALc3NoLWVkMjU1MTkAAABA",
-	"-----END SSH SIGNATURE-----")
-
 // ghIdent is a valid committer value with the GitHub committer address.
-// ghHeader is forgeHeader with that committer. Only such a header can hold a
-// signature.
+// ghHeader is forgeHeader with that committer.
 const (
 	ghIdent  = "GitHub <noreply@github.com> 1700000000 +0000"
 	ghHeader = "tree TREE\nparent PARENT\nauthor " + ident + "\ncommitter " + ghIdent + "\n"
 )
 
-// githubHeader has the form of the header of a squash merge by GitHub, with a
-// PGP signature. The signature is an abridged copy: 3 of its 14 base64 lines.
+// githubHeader has the form of the header of a commit that GitHub makes, with
+// a PGP signature. The signature is an abridged copy: 3 of its 14 base64 lines.
 var githubHeader = hdr("cybagard labs <"+me+"> 1795097930 +0100",
 	"GitHub <noreply@github.com> 1795097930 +0100") + pgpSig
 
@@ -1143,39 +1165,22 @@ func failsHeader(t *testing.T, header string, flags ...string) {
 	}
 }
 
-// A header with an extra key, a wrong count or order, or a signature with other
-// lines fails. So does a signature with the maintainer as committer, and an
-// author name with two spaces before the address. Git accepts the forms in the
-// first group.
+// A header with an extra key, a wrong count or order, or a signature field
+// fails, also with the GitHub committer. So does an author name with two
+// spaces before the address. Git accepts the forms in the first group.
 func TestHeaderFails(t *testing.T) {
 	lit := "--literally"
-	forged := "cybagard <" + me + "> alice@example.com <x@y.z> 1700000000 +0000"
-	pgp := func(lines ...string) string {
-		return ghHeader + armor("gpgsig -----BEGIN PGP SIGNATURE-----", lines...)
-	}
-	end := "-----END PGP SIGNATURE-----"
+	forged := "cybagard <" + me + "> alice@example.com <x@y.example> 1700000000 +0000"
+	sha := strings.Replace(pgpSig, "gpgsig ", "gpgsig-sha256 ", 1)
 	for name, header := range map[string]string{
-		"x-note key":     forgeHeader + "x-note <" + other + ">\n",
-		"mergetag key":   forgeHeader + armor("mergetag object TREE", "type commit", "tagger t <"+other+"> 1 +0000", "", "tag"),
-		"key in a case":  forgeHeader + "GPGSIG x\n",
-		"second tree":    forgeHeader + "tree TREE\n",
-		"address line":   pgp("", "alice@example.com", end),
-		"Comment line":   pgp("Comment: hello", end),
-		"Version line":   pgp("Version: GnuPG v1", end),
-		"tagger line":    pgp("tagger t <"+other+"> 1 +0000", end),
-		"no END line":    pgp("", "abcd"),
-		"text after END": pgp("", end, "abcd"),
-		"second END":     pgp("", end, end),
-		"two checksums":  pgp("=abcd", "=abcd", end),
-		"no armor":       ghHeader + "gpgsig alice\n",
-		"SSH checksum":   ghHeader + armor("gpgsig -----BEGIN SSH SIGNATURE-----", "=abcd", "-----END SSH SIGNATURE-----"),
-		"mixed armor":    ghHeader + armor("gpgsig -----BEGIN SSH SIGNATURE-----", end),
-		"two signatures": ghHeader + pgpSig + pgpSig,
-		// A signature field needs the GitHub committer address.
-		"PGP signature, maintainer committer":    forgeHeader + pgpSig,
-		"SSH signature, maintainer committer":    forgeHeader + sshSig,
-		"sha256 signature, maintainer committer": forgeHeader + strings.Replace(pgpSig, "gpgsig ", "gpgsig-sha256 ", 1),
-		"two spaces before the address":          hdr("t  <"+me+"> 1700000000 +0000", ident),
+		"x-note key":                    forgeHeader + "x-note <" + other + ">\n",
+		"mergetag key":                  forgeHeader + armor("mergetag object TREE", "type commit", "tagger t <"+other+"> 1 +0000", "", "tag"),
+		"key in a case":                 forgeHeader + "GPGSIG x\n",
+		"second tree":                   forgeHeader + "tree TREE\n",
+		"two spaces before the address": hdr("t  <"+me+"> 1700000000 +0000", ident),
+		"gpgsig field":                  ghHeader + pgpSig,
+		"gpgsig-sha256 field":           ghHeader + sha,
+		"both signature fields":         ghHeader + sha + pgpSig,
 	} {
 		t.Run(name, func(t *testing.T) { failsHeader(t, header) })
 	}
@@ -1200,17 +1205,12 @@ func TestHeaderFails(t *testing.T) {
 	}
 }
 
-// These headers pass: a GitHub squash merge form and an SSH signature, both
-// with the GitHub committer. Also these pass: the key gpgsig-sha256, a root
-// commit and a merge commit.
+// These headers pass: an unsigned commit with the GitHub committer, also in
+// upper case, a root commit and a merge commit.
 func TestHeaderPasses(t *testing.T) {
-	sha := strings.Replace(pgpSig, "gpgsig ", "gpgsig-sha256 ", 1)
 	for name, header := range map[string]string{
-		"GitHub PGP object":              githubHeader,
-		"SSH signature":                  ghHeader + sshSig,
-		"signature key sha256":           ghHeader + sha,
-		"both signatures":                ghHeader + sha + pgpSig,
-		"GitHub committer in upper case": "tree TREE\nparent PARENT\nauthor " + ident + "\ncommitter GitHub <NOREPLY@GITHUB.COM> 1 +0000\n" + pgpSig,
+		"GitHub committer":               ghHeader,
+		"GitHub committer in upper case": hdr(ident, "GitHub <NOREPLY@GITHUB.COM> 1 +0000"),
 		"root commit":                    "tree TREE\nauthor " + ident + "\ncommitter " + ident + "\n",
 		"merge commit":                   "tree TREE\nparent PARENT\nparent PARENT\nauthor " + ident + "\ncommitter " + ident + "\n",
 	} {
@@ -1226,26 +1226,23 @@ func TestHeaderPasses(t *testing.T) {
 
 // The setting log.showSignature in the repository adds gpg text to the output
 // of git log for a signed commit. dco asks for no signature, so the output
-// holds only the expected line.
+// holds only the expected lines. The test uses an empty GnuPG home.
 func TestShowSignatureSettingChangesNothing(t *testing.T) {
+	t.Setenv("GNUPGHOME", t.TempDir())
 	dir, hash := forgeRaw(t, githubHeader, signoff, "--literally")
 	git(t, dir, "config", "log.showSignature", "true")
-	if shown := git(t, dir, "log", "-1", "--format=%H", hash); !strings.Contains(shown, "gpg") {
-		t.Fatalf("the setting does not change the output of git log: %q", shown)
+	cmd := exec.Command("git", "-C", dir, "log", "-1", "--format=%H", hash)
+	shown, err := cmd.Output()
+	if err != nil || !strings.Contains(string(shown), "gpg") {
+		t.Fatalf("the setting does not put gpg text in the output of git log: %q, %v", shown, err)
 	}
 	code, out, errOut := runDCO([]string{"base", "forged"}, dir)
-	const want = "dco: all 1 commits in base..forged carry Signed-off-by and pass the identity rule\n"
-	if code != 0 || out != want || errOut != "" || strings.Contains(out+errOut, "gpg") {
-		t.Fatalf("run = %d, want 0 and only %q; output %q %q", code, want, out, errOut)
+	if code != 1 || errOut != "" || strings.Contains(out, "gpg") {
+		t.Fatalf("run = %d, want 1 and no gpg text; output %q %q", code, out, errOut)
 	}
-}
-
-// A base64 line has at most two "=" signs at its end.
-func TestSigOKBase64Padding(t *testing.T) {
-	for line, want := range map[string]bool{"AAAA": true, "AAA=": true, "AA==": true, "AAAA===": false, "=AAA": false} {
-		sig := []string{"-----BEGIN SSH SIGNATURE-----", line, "-----END SSH SIGNATURE-----"}
-		if got := sigOK(sig); got != want {
-			t.Errorf("sigOK with the line %q = %v, want %v", line, got, want)
+	for _, l := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if !strings.HasPrefix(l, "identity: ") && !strings.HasPrefix(l, "dco FAIL: ") && !strings.HasPrefix(l, "hint: ") {
+			t.Errorf("unexpected output line %q", l)
 		}
 	}
 }
@@ -1267,6 +1264,7 @@ func TestIdentLineOK(t *testing.T) {
 		{"<" + me + "> 1 +0000", false, false},
 		{"t  <" + me + "> 1 +0000", false, false},
 		{"t\t<" + me + "> 1 +0000", false, false},
+		{"t\t <" + me + "> 1 +0000", false, false},
 		{" t <" + me + "> 1 +0000", false, false},
 		{"\tt <" + me + "> 1 +0000", false, false},
 		{"a b <" + me + "> 1 +0000", false, true},

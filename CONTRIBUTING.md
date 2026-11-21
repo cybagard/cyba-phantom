@@ -33,17 +33,17 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    Any other "@" fails the check. The author name and the committer name
    follow the same character list and hold no "@". The check also reads
    the header of the commit object. The permitted keys are `tree`,
-   `parent`, `author`, `committer`, `gpgsig` and `gpgsig-sha256`. Their
-   count and order are fixed. The `author` and `committer` lines
-   have only the name, the address, the time and the time zone, with
-   one space between them. The name is not empty. It does not start or
-   end with a space or a TAB. A signature holds only armor lines. A
-   signature field passes only when the committer is the GitHub
-   committer, so a commit that you sign yourself fails. An `encoding`
-   line fails, also one with an empty value. The header comment of
-   `tools/dco/main.go` gives
-   the full rules, with the forms that fail by design and the known
-   limits. A commit that fails one of these rules fails the check.
+   `parent`, `author` and `committer`. The order is one `tree`, any
+   `parent` lines, one `author` and one `committer`. The `author` and
+   `committer` lines have only the name, the address, the time and the
+   time zone, with one space between them. The name is not empty. It
+   does not start or end with a space or a TAB. A signed commit fails.
+   So a commit that GitHub makes in a pull request fails: a web edit, a
+   suggestion or "Update branch". Make it again locally with
+   `git commit -s`. An `encoding` line fails, also one with an empty
+   value. The header comment of `tools/dco/main.go` gives the full
+   rules, with the forms that fail by design and the known limits. A
+   commit that fails one of these rules fails the check.
    An outside contributor forks, branches, commits with `git commit -s`,
    and opens a pull request. An outside contributor commits with their
    own name and address, never with the maintainer address. The `dco`
