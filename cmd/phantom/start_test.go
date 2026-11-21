@@ -430,11 +430,11 @@ func beganSchedule(began chan struct{}) func(*store.Writer, startParams, *slog.L
 	}
 }
 
-// TestTS13_FirstStartKeepsTheRunAtStart checks a first start with the store
-// schedule and no cap: no key, an empty log and an empty store. The run at the
-// start writes the retention leaf, and it must not stop the new key (T-S-13,
-// SEC-16, T-U-27). So after the run, the key exists, the checkpointer runs and
-// the log has the leaf.
+// TestTS13_FirstStartKeepsTheRunAtStart checks a first start with no cap: no
+// key, an empty log and an empty store. The schedule is the store schedule.
+// The run at the start writes the retention leaf, and it must not stop the
+// new key (T-S-13, SEC-16, T-U-27). So after the run, the key exists, the
+// checkpointer runs and the log has the leaf.
 func TestTS13_FirstStartKeepsTheRunAtStart(t *testing.T) {
 	began := make(chan struct{})
 	d := realDeps
