@@ -420,6 +420,107 @@ func TestTU27_StartRunsTheSchedule(t *testing.T) {
 	}
 }
 
+// beganSchedule is the real schedule of realDeps. It closes began when the
+// start check of the run ends.
+func beganSchedule(began chan struct{}) func(*store.Writer, startParams, *slog.Logger) (func(context.Context), error) {
+	return func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
+		sc := store.NewSchedule(w, p.IPDays, p.RawDays, p.EventsDays, lg)
+		go func() { <-sc.Began(); close(began) }()
+		return sc.Run, nil
+	}
+}
+
+// TestTS13_FirstStartKeepsTheRunAtStart checks a first start with the real
+// schedule: no key, an empty log and an empty store. The run at the start
+// writes the retention leaf, and it must not stop the new key (T-S-13, SEC-16,
+// T-U-27). So after the run, the key exists, the checkpointer runs and the log
+// has the leaf.
+func TestTS13_FirstStartKeepsTheRunAtStart(t *testing.T) {
+	began := make(chan struct{})
+	d := realDeps
+	d.schedule = beganSchedule(began)
+	p := testParams(t, "events.db")
+	s, _ := launch(t, p, d)
+	select {
+	case <-began:
+	case <-time.After(netWait):
+		t.Fatal("the schedule did not end its start check")
+	}
+	if _, err := os.Stat(filepath.Join(p.Root, tlog.VKeyName)); err != nil {
+		t.Errorf("public key file: %v; want it made", err)
+	}
+	if s.cp == nil || !s.TlogHealthy() {
+		t.Errorf("checkpointer started %v, tlog healthy %v; want both", s.cp != nil, s.TlogHealthy())
+	}
+	until(t, "leaf of the run at the start", func() bool {
+		size, _ := s.log.Head()
+		return size >= 1
+	})
+}
+
+// TestTU27_RunStartsAfterTheCheckpointer checks the order of the start with no
+// timing. The wrapped checkpointer sets a flag. The wrapped run reads the flag
+// as its first step. A run that starts before the key check can write a leaf
+// before it. Then the key check refuses a new key (T-U-27, T-S-13).
+func TestTU27_RunStartsAfterTheCheckpointer(t *testing.T) {
+	var made atomic.Bool
+	sawFlag := make(chan bool, 1)
+	d := realDeps
+	d.newCheckpointer = func(l *tlog.Log, sg note.Signer, v note.Verifier, sink tlog.NoteSink,
+		r *os.Root, origin string, iv time.Duration, lg *slog.Logger) (*tlog.Checkpointer, error) {
+		made.Store(true)
+		return tlog.NewCheckpointer(l, sg, v, sink, r, origin, iv, lg)
+	}
+	d.schedule = func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
+		run, err := realDeps.schedule(w, p, lg)
+		return func(ctx context.Context) {
+			sawFlag <- made.Load()
+			run(ctx)
+		}, err
+	}
+	launch(t, testParams(t, "events.db"), d)
+	select {
+	case ok := <-sawFlag:
+		if !ok {
+			t.Error("the run started before the checkpointer")
+		}
+	case <-time.After(netWait):
+		t.Fatal("the run did not start")
+	}
+}
+
+// TestTU27_RunStartsWithoutCheckpointer checks a checkpointer that does not
+// start, as the public key file is not the key of the signer. The run at the
+// start still runs and writes its mark (T-U-27, T-U-18). The run does not
+// depend on the checkpointer (C8).
+func TestTU27_RunStartsWithoutCheckpointer(t *testing.T) {
+	p := testParams(t, "events.db")
+	savedKey(t, p)
+	vpath := filepath.Join(p.Root, tlog.VKeyName)
+	if err := os.Remove(vpath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vpath, []byte(otherKey(t, "other/origin")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	began := make(chan struct{})
+	d := realDeps
+	d.schedule = beganSchedule(began)
+	s, _ := launch(t, p, d)
+	select {
+	case <-began:
+	case <-time.After(netWait):
+		t.Fatal("the schedule did not end its start check")
+	}
+	if s.cp != nil {
+		t.Error("checkpointer started; want none")
+	}
+	var v string
+	if err := s.db.QueryRow("SELECT value FROM meta WHERE key = 'retention_last'").Scan(&v); err != nil {
+		t.Fatalf("the schedule wrote no mark: %v", err)
+	}
+}
+
 // TestTU27_StartPassesTheScheduleValues checks that start gives the schedule
 // the events days, the cap and the store path of the params. The values are not
 // the defaults, so a start that passes the raw days or a constant fails
