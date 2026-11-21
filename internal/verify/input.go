@@ -124,6 +124,7 @@ func ParseCheckpoint(b []byte, v note.Verifier) (Checkpoint, error) {
 	if len(b) > MaxNoteBytes {
 		return Checkpoint{}, ErrTooLarge
 	}
+	b = bytes.Clone(b)
 	c, err := verifier.ParseCheckpoint(b, v.Name(), v)
 	if err != nil {
 		_, nerr := note.Open(b, note.VerifierList(v))
@@ -142,7 +143,7 @@ func ParseCheckpoint(b []byte, v note.Verifier) (Checkpoint, error) {
 		size:    c.Size,
 		root:    c.Root,
 		keyHash: v.KeyHash(),
-		note:    bytes.Clone(b),
+		note:    b,
 	}, nil
 }
 

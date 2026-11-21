@@ -168,12 +168,11 @@ func TestTS14_CheckpointValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := ParseCheckpoint(good, v)
-	if err != nil {
-		t.Fatal(err)
+	if c.Origin() != origin || c.Size() != 7 || c.Root() != testRoot || !bytes.Equal(c.Note(), good) {
+		t.Errorf("value %+v differs from the note", c)
 	}
-	if c.Origin() != p.Origin() || c.Size() != p.Size() || c.Root() != p.Root() || !bytes.Equal(c.Note(), good) {
-		t.Errorf("value %+v differs from the parsed note %+v", c, p)
+	if c.keyHash != v.KeyHash() {
+		t.Errorf("key hash %08x, want %08x", c.keyHash, v.KeyHash())
 	}
 	got := c.Note()
 	got[0] ^= 1
@@ -198,6 +197,9 @@ func TestTS14_ParseCheckpointCopy(t *testing.T) {
 	}
 	if !bytes.Equal(c.Note(), good) || c.Origin() != origin || c.Size() != 7 || c.Root() != testRoot {
 		t.Errorf("the value changed with the input: %+v", c)
+	}
+	if c.keyHash != v.KeyHash() {
+		t.Errorf("key hash %08x, want %08x", c.keyHash, v.KeyHash())
 	}
 }
 

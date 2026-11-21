@@ -28,8 +28,8 @@ func emptyRoot() modtlog.Hash {
 // the size of the prior checkpoint and N is the size of the latest checkpoint.
 //
 // Two checkpoints with different origins are not one log. That gives ErrFork.
-// Two checkpoints with different key hashes also give ErrFork, also when the
-// origins are equal.
+// Two checkpoints with different key hashes also give ErrFork. This holds
+// with equal origins too.
 // If N is larger than S, a proof from S to N must verify. If N is smaller than
 // S, a proof from N to S must verify. If the sizes are equal, the roots must be
 // equal. A size of 0 needs no proof, but its root must be the root of the empty
@@ -39,9 +39,9 @@ func emptyRoot() modtlog.Hash {
 // The zero value is not from ReadCheckpoint. It has size 0 and a root that is
 // not the empty root, so it gives ErrFork.
 //
-// A proof that fails gives ErrFork. So do roots that differ at one size,
-// different origins, different key hashes, and a bad empty root. A list without
-// the needed proof gives ErrNoProof.
+// These give ErrFork: a proof that fails, and roots that differ at one size.
+// Different origins, different key hashes and a bad empty root give ErrFork
+// too. A list without the needed proof gives ErrNoProof.
 func Consistency(prior, latest Checkpoint, proofs []ConsistencyProof) error {
 	if prior.origin != latest.origin || prior.keyHash != latest.keyHash {
 		return ErrFork
