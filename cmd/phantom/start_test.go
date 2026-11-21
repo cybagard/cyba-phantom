@@ -420,8 +420,8 @@ func TestTU27_StartRunsTheSchedule(t *testing.T) {
 	}
 }
 
-// beganSchedule is the real schedule of realDeps. It closes began when the
-// start check of the run ends.
+// beganSchedule is the schedule of realDeps with no cap. It closes began
+// when the start check of the run ends.
 func beganSchedule(began chan struct{}) func(*store.Writer, startParams, *slog.Logger) (func(context.Context), error) {
 	return func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
 		sc := store.NewSchedule(w, p.IPDays, p.RawDays, p.EventsDays, lg)
@@ -430,11 +430,11 @@ func beganSchedule(began chan struct{}) func(*store.Writer, startParams, *slog.L
 	}
 }
 
-// TestTS13_FirstStartKeepsTheRunAtStart checks a first start with the real
-// schedule: no key, an empty log and an empty store. The run at the start
-// writes the retention leaf, and it must not stop the new key (T-S-13, SEC-16,
-// T-U-27). So after the run, the key exists, the checkpointer runs and the log
-// has the leaf.
+// TestTS13_FirstStartKeepsTheRunAtStart checks a first start with the store
+// schedule and no cap: no key, an empty log and an empty store. The run at the
+// start writes the retention leaf, and it must not stop the new key (T-S-13,
+// SEC-16, T-U-27). So after the run, the key exists, the checkpointer runs and
+// the log has the leaf.
 func TestTS13_FirstStartKeepsTheRunAtStart(t *testing.T) {
 	began := make(chan struct{})
 	d := realDeps
