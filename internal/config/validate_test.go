@@ -1266,9 +1266,10 @@ func TestTS11_ConflictFoldsStateRoot(t *testing.T) {
 	runRows(t, []row{
 		{"keys", "/srv/phantom/keys/e.db", "the keys directory"},
 		{"checkpoints", "/srv/phantom/checkpoints/e.db", "the checkpoints directory"},
-		{"checkpoint.state", "/srv/phantom/checkpoint.state", "must not be checkpoint.state"},
-		{"checkpoint.state.tmp", "/srv/phantom/checkpoint.state.tmp", "must not be checkpoint.state.tmp"},
-		{"writer.stop", "/srv/phantom/writer.stop", "must not be writer.stop"},
+		{"checkpoint.state", "/srv/phantom/checkpoint.state", "must not be or be in checkpoint.state"},
+		{"checkpoint.state.tmp", "/srv/phantom/checkpoint.state.tmp", "must not be or be in checkpoint.state.tmp"},
+		{"writer.stop", "/srv/phantom/writer.stop", "must not be or be in writer.stop"},
+		{"in writer.stop", "/srv/phantom/writer.stop/e.db", "must not be or be in writer.stop"},
 	}, func(p string) string { return storeConflict(l.stateRoot, nil, p) })
 	runRows(t, []row{
 		{"keys", "/srv/phantom/keys/c", "the keys directory"},
@@ -1417,9 +1418,10 @@ func TestTS11_StorePathText(t *testing.T) {
 
 // tlogLines returns the number of line breaks that the load error has. The
 // store.path error can be "in tlog.dir". Then tlog.dir is in or above
-// store.path, and it has its own error.
-func tlogLines(want string) int {
-	if want == "in tlog.dir" {
+// store.path, and it has its own error. If store.path is acme.cache_dir, that
+// key has its own error too.
+func tlogLines(name, want string) int {
+	if want == "in tlog.dir" || name == "acme.cache_dir itself" {
 		return 1
 	}
 	return 0
@@ -1458,9 +1460,14 @@ func TestTS11_StorePathLoad(t *testing.T) {
 		{"keys itself", s + "keys", nil, "keys directory"},
 		{"checkpoints", s + "checkpoints/e.db", nil, "checkpoints directory"},
 		{"checkpoints itself", s + "checkpoints", nil, "checkpoints directory"},
-		{"checkpoint.state", s + "checkpoint.state", nil, "must not be checkpoint.state"},
-		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be checkpoint.state.tmp"},
-		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
+		{"checkpoint.state", s + "checkpoint.state", nil, "must not be or be in checkpoint.state"},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be or be in checkpoint.state.tmp"},
+		{"writer.stop", s + "writer.stop", nil, "must not be or be in writer.stop"},
+		{"in writer.stop", s + "writer.stop/e.db", nil, "must not be or be in writer.stop"},
+		{"in checkpoint.state", s + "checkpoint.state/e.db", nil, "must not be or be in checkpoint.state"},
+		{"in checkpoint.state.tmp", s + "checkpoint.state.tmp/e.db", nil, "must not be or be in checkpoint.state.tmp"},
+		{"in writer.stop in other case", s + "WRITER.STOP/e.db", nil, "must not be or be in writer.stop"},
+		{"name that starts like writer.stop", s + "writer.stop2/e.db", nil, ""},
 		{"tlog.dir in other case", s + "TLOG/e.db", nil, "in tlog.dir"},
 		{"tlog.dir itself in other case", s + "Tlog", nil, "in tlog.dir"},
 		{"tlog.dir set, in other case", s + "Logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "logs"}, "in tlog.dir"},
@@ -1471,9 +1478,9 @@ func TestTS11_StorePathLoad(t *testing.T) {
 		{"bundle dir set, nested in other case", s + "A/b/events.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "a/x.cbnd"}, "directory of bundle.path"},
 		{"keys in other case", s + "Keys/e.db", nil, "keys directory"},
 		{"checkpoints in other case", s + "CHECKPOINTS/e.db", nil, "checkpoints directory"},
-		{"checkpoint.state in other case", s + "Checkpoint.State", nil, "must not be checkpoint.state"},
-		{"checkpoint.state.tmp in other case", s + "CHECKPOINT.STATE.TMP", nil, "must not be checkpoint.state.tmp"},
-		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"checkpoint.state in other case", s + "Checkpoint.State", nil, "must not be or be in checkpoint.state"},
+		{"checkpoint.state.tmp in other case", s + "CHECKPOINT.STATE.TMP", nil, "must not be or be in checkpoint.state.tmp"},
+		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be or be in writer.stop"},
 		{"tlog.dir set in other case", s + "logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "in tlog.dir"},
 		{"acme.cache_dir set in other case", s + "cache/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "CACHE"}, "in acme.cache_dir"},
 		{"bundle dir set in other case", s + "b/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "B/x.cbnd"}, "directory of bundle.path"},
@@ -1487,7 +1494,7 @@ func TestTS11_StorePathLoad(t *testing.T) {
 			case err == nil:
 			case !strings.Contains(err.Error(), "store.path at PHANTOM_STORE_PATH: ") || !strings.Contains(err.Error(), r.want):
 				t.Errorf("got %v, want an error on store.path with %q", err, r.want)
-			case strings.Count(err.Error(), "\n") != tlogLines(r.want):
+			case strings.Count(err.Error(), "\n") != tlogLines(r.name, r.want):
 				t.Errorf("got %v, want no error on another key but tlog.dir", err)
 			}
 		})
@@ -1593,13 +1600,34 @@ func TestTS11_TLogDirLoad(t *testing.T) {
 		{"keys", s + "keys", nil, "in or above the keys directory"},
 		{"in keys", s + "keys/t", nil, "in or above the keys directory"},
 		{"checkpoints", s + "checkpoints", nil, "in or above the checkpoints directory"},
-		{"checkpoint.state", s + "checkpoint.state", nil, "must not be checkpoint.state"},
-		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be checkpoint.state.tmp"},
-		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
+		{"checkpoint.state", s + "checkpoint.state", nil, "must not be or be in checkpoint.state"},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be or be in checkpoint.state.tmp"},
+		{"writer.stop", s + "writer.stop", nil, "must not be or be in writer.stop"},
+		{"in writer.stop", s + "writer.stop/t", nil, "must not be or be in writer.stop"},
+		{"in checkpoint.state", s + "checkpoint.state/t", nil, "must not be or be in checkpoint.state"},
+		{"in checkpoint.state.tmp", s + "checkpoint.state.tmp/t", nil, "must not be or be in checkpoint.state.tmp"},
+		{"in writer.stop in other case", s + "WRITER.STOP/t", nil, "must not be or be in writer.stop"},
+		{"store.path-wal", s + "events.db-wal", nil, "must not be or be in a file of store.path"},
+		{"store.path-shm", s + "events.db-shm", nil, "must not be or be in a file of store.path"},
+		{"store.path-journal", s + "events.db-journal", nil, "must not be or be in a file of store.path"},
+		{"store.path.new", s + "events.db.new", nil, "must not be or be in a file of store.path"},
+		{"store.path.new-wal", s + "events.db.new-wal", nil, "must not be or be in a file of store.path"},
+		{"store.path.new-shm", s + "events.db.new-shm", nil, "must not be or be in a file of store.path"},
+		{"store.path.new-journal", s + "events.db.new-journal", nil, "must not be or be in a file of store.path"},
+		{"in store.path-wal", s + "events.db-wal/t", nil, "must not be or be in a file of store.path"},
+		{"in store.path.new", s + "events.db.new/t", nil, "must not be or be in a file of store.path"},
+		{"in store.path.new-wal", s + "events.db.new-wal/t", nil, "must not be or be in a file of store.path"},
+		{"store.path-wal in other case", s + "Events.DB-WAL", nil, "must not be or be in a file of store.path"},
+		{"store.path.new in other case", s + "EVENTS.DB.NEW", nil, "must not be or be in a file of store.path"},
+		{"store.path set, .new-shm", s + "d/e.db.new-shm/t", []string{"PHANTOM_STORE_PATH=" + s + "d/e.db"}, "must not be or be in a file of store.path"},
+		{"store.path set in other case, .new-shm", s + "d/e.db.new-shm", []string{"PHANTOM_STORE_PATH=" + s + "D/E.DB"}, "must not be or be in a file of store.path"},
+		{"name that starts like store.path-wal", s + "events.db-wal2", nil, ""},
+		{"name that starts like store.path.new", s + "events.db.newx", nil, ""},
+		{"name that starts like writer.stop with a part", s + "writer.stop2/t", nil, ""},
 		{"keys in other case", s + "Keys", nil, "in or above the keys directory"},
-		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be or be in writer.stop"},
 		{"in checkpoints in other case", s + "CHECKPOINTS/x", nil, "in or above the checkpoints directory"},
-		{"writer.stop with a capital", s + "Writer.Stop", nil, "must not be writer.stop"},
+		{"writer.stop with a capital", s + "Writer.Stop", nil, "must not be or be in writer.stop"},
 		{"acme.cache_dir in other case", s + "CERTS", nil, "in or above acme.cache_dir"},
 		{"above acme.cache_dir in other case", s + "A", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "a/c"}, "in or above acme.cache_dir"},
 	}
@@ -1620,6 +1648,49 @@ func TestTS11_TLogDirLoad(t *testing.T) {
 		_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom")
 		if err == nil || !strings.Contains(err.Error(), "tlog.dir at ") || strings.Count(err.Error(), "\n") != 0 {
 			t.Errorf("got %v, want one error on tlog.dir", err)
+		}
+	})
+}
+
+// TestTS11_CacheDirLoad checks that the load refuses an acme.cache_dir at
+// store.path or a file of it. It also refuses a path in one of them.
+// The compare folds A-Z. The error names acme.cache_dir (SEC-21).
+func TestTS11_CacheDirLoad(t *testing.T) {
+	const s = "/var/lib/phantom/"
+	for _, r := range []struct {
+		name, dir string
+		want      bool // want is true for a value that the load refuses.
+	}{
+		{"default", s + "certs", false},
+		{"name that starts like store.path", s + "events.db2", false},
+		{"name that starts like store.path.new", s + "events.db.newx", false},
+		{"store.path", s + "events.db", true},
+		{"in store.path", s + "events.db/c", true},
+		{"store.path-wal", s + "events.db-wal", true},
+		{"store.path-shm", s + "events.db-shm", true},
+		{"store.path-journal", s + "events.db-journal", true},
+		{"store.path.new", s + "events.db.new", true},
+		{"store.path.new-wal", s + "events.db.new-wal", true},
+		{"store.path.new-shm", s + "events.db.new-shm", true},
+		{"store.path.new-journal", s + "events.db.new-journal", true},
+		{"in store.path.new-wal", s + "events.db.new-wal/c", true},
+		{"store.path in other case", s + "EVENTS.DB", true},
+		{"store.path.new in other case", s + "Events.Db.New/c", true},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, base, "PHANTOM_ACME_CACHE_DIR="+r.dir)
+			switch {
+			case !r.want && err != nil:
+				t.Errorf("got %v", err)
+			case r.want && (err == nil || !strings.Contains(err.Error(), "acme.cache_dir at PHANTOM_ACME_CACHE_DIR: the path must not be or be in store.path or a file of it")):
+				t.Errorf("got %v, want an error on acme.cache_dir", err)
+			}
+		})
+	}
+	t.Run("store.path set in other case", func(t *testing.T) {
+		_, err := loadProd(t, base, "PHANTOM_ACME_CACHE_DIR="+s+"d/e.db.new-wal", "PHANTOM_STORE_PATH="+s+"D/E.DB")
+		if err == nil || !strings.Contains(err.Error(), "acme.cache_dir at PHANTOM_ACME_CACHE_DIR: ") {
+			t.Errorf("got %v, want an error on acme.cache_dir", err)
 		}
 	})
 }
@@ -1689,6 +1760,14 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 		{"directory is store.path-wal in other case", s + "DB-WAL/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"in store.path-shm in other case", s + "Db-Shm/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"in store.path in other case", s + "DB/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path.new", s + "db.new/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path.new-wal", s + "db.new-wal/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path.new-shm", s + "db.new-shm/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path.new-journal", s + "db.new-journal/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"in store.path.new", s + "db.new/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path.new in other case", s + "DB.NEW/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"store.path set in other case, .new-wal", s + "db.new-wal/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "DB"}, "or a file of it"},
+		{"directory like store.path.new", s + "db.newx/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
