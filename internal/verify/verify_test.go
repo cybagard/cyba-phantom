@@ -376,10 +376,10 @@ func FuzzTS14_Inclusion(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Inclusion accepted a checkpoint that ParseCheckpoint refuses: %v", err)
 		}
-		if res.Origin != c.Origin || res.Size != c.Size || res.Root != c.Root ||
+		if res.Origin != c.Origin() || res.Size != c.Size() || res.Root != c.Root() ||
 			res.EventHash != e.Hash || res.LeafIndex != p.Index || !slices.Equal(res.Proof, p.Hashes) ||
-			!slices.Equal(res.Consistency, p.Consistency) || (p.TreeSize == int64(c.Size)) != (p.Root == nil) ||
-			p.TreeSize > int64(c.Size) {
+			!slices.Equal(res.Consistency, p.Consistency) || (p.TreeSize == int64(c.Size())) != (p.Root == nil) ||
+			p.TreeSize > int64(c.Size()) {
 			t.Errorf("result does not match the inputs: %+v", res)
 		}
 		// The proof must hold with VerifyInclusion at the size of the proof. A

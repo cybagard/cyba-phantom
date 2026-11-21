@@ -458,6 +458,75 @@ func TestTS14_UpdateRefusesValue(t *testing.T) {
 	}
 }
 
+// T-S-14: two checkpoints from two keys with one name are not one log. This
+// holds also when the sizes and the roots are equal. Different sizes with a
+// proof that verifies give ErrFork too.
+func TestTS14_ConsistencyKeyHash(t *testing.T) {
+	sA, textA := newKey(t, origin)
+	vA, _ := ParseKey([]byte(textA))
+	sB, textB := newKey(t, origin) // same name, another key hash
+	vB, _ := ParseKey([]byte(textB))
+	l, _ := realLog(t, 10)
+	a10, b10 := checkpointOf(t, vA, checkpointAt(t, l, sA, 10)), checkpointOf(t, vB, checkpointAt(t, l, sB, 10))
+	a5, b5 := checkpointOf(t, vA, checkpointAt(t, l, sA, 5)), checkpointOf(t, vB, checkpointAt(t, l, sB, 5))
+	proofs := []ConsistencyProof{consProof(t, l, 5, 10)}
+	wantErr(t, "same size and root", Consistency(a10, b10, nil), ErrFork)
+	wantErr(t, "same size and root, reverse", Consistency(b10, a10, nil), ErrFork)
+	wantErr(t, "other size, proof verifies", Consistency(a5, b10, proofs), ErrFork)
+	wantErr(t, "other size, reverse", Consistency(b10, a5, proofs), ErrFork)
+	wantErr(t, "one key", Consistency(a5, a10, proofs), nil)
+	wantErr(t, "other key, one key", Consistency(b5, b10, proofs), nil)
+}
+
+// T-S-14: Update refuses a value from a key with the name of the state key and
+// another key hash. This holds for a larger, an equal and a smaller size. It
+// writes nothing, and the state in the object stays as it was.
+func TestTS14_UpdateKeyHash(t *testing.T) {
+	sA, textA := newKey(t, origin)
+	vA, _ := ParseKey([]byte(textA))
+	sB, textB := newKey(t, origin)
+	vB, _ := ParseKey([]byte(textB))
+	l, _ := realLog(t, 10)
+	cpA, cpB := checkpointAt(t, l, sA, 5), func(size int64) Checkpoint {
+		return checkpointOf(t, vB, checkpointAt(t, l, sB, size))
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(dir, vA, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// First use: no state file. The refusal makes no file.
+	empty := snapshot(t, dir)
+	if got, err := st.Update(cpB(10)); got != 0 || err != ErrState {
+		t.Errorf("first use: %v, %v, want 0 and ErrState", got, err)
+	}
+	if after := snapshot(t, dir); after != empty {
+		t.Errorf("first use: the directory changed:\n%s", after)
+	}
+	if _, ok := st.Checkpoint(); ok {
+		t.Error("first use: the object holds a state")
+	}
+	if _, err := st.Update(checkpointOf(t, vA, cpA)); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, dir)
+	for _, size := range []int64{10, 5, 3} {
+		if got, err := st.Update(cpB(size)); got != 0 || err != ErrState {
+			t.Errorf("size %d: %v, %v, want 0 and ErrState", size, got, err)
+		}
+		if after := snapshot(t, dir); after != before {
+			t.Errorf("size %d: the directory changed:\n%s\n%s", size, before, after)
+		}
+		if c, ok := st.Checkpoint(); !ok || !bytes.Equal(c.Note(), cpA) {
+			t.Errorf("size %d: the object does not hold the old value", size)
+		}
+	}
+}
+
 // leftover makes a file in dir and returns its name.
 func leftover(t *testing.T, dir, name string) string {
 	t.Helper()

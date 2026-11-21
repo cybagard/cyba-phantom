@@ -133,10 +133,10 @@ func TestTS14_Checkpoint(t *testing.T) {
 		_, err := ParseCheckpoint(tc.msg, tc.v)
 		wantErr(t, name, err, tc.want)
 	}
-	if c, err := ParseCheckpoint(signed(t, s, maxSize), v); err != nil || c.Size != maxSize {
+	if c, err := ParseCheckpoint(signed(t, s, maxSize), v); err != nil || c.Size() != maxSize {
 		t.Errorf("size 2^48: %+v, %v", c, err)
 	}
-	if c, err := ParseCheckpoint(signed(t, s, 0), v); err != nil || c.Size != 0 {
+	if c, err := ParseCheckpoint(signed(t, s, 0), v); err != nil || c.Size() != 0 {
 		t.Errorf("size 0: %+v, %v", c, err)
 	}
 	_, err = ReadCheckpoint(bytes.NewReader(make([]byte, 1<<20)), v)
@@ -172,13 +172,32 @@ func TestTS14_CheckpointValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Origin() != p.Origin || c.Size() != p.Size || c.Root() != p.Root || !bytes.Equal(c.Note(), good) {
+	if c.Origin() != p.Origin() || c.Size() != p.Size() || c.Root() != p.Root() || !bytes.Equal(c.Note(), good) {
 		t.Errorf("value %+v differs from the parsed note %+v", c, p)
 	}
 	got := c.Note()
 	got[0] ^= 1
 	if !bytes.Equal(c.Note(), good) {
 		t.Errorf("note bytes changed through the returned slice")
+	}
+}
+
+// T-S-14: the value of ParseCheckpoint keeps its own copy of the note bytes. A
+// change of the input after the call does not change the value.
+func TestTS14_ParseCheckpointCopy(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	good := signed(t, s, 7)
+	in := bytes.Clone(good)
+	c, err := ParseCheckpoint(in, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range in {
+		in[i] ^= 0xff
+	}
+	if !bytes.Equal(c.Note(), good) || c.Origin() != origin || c.Size() != 7 || c.Root() != testRoot {
+		t.Errorf("the value changed with the input: %+v", c)
 	}
 }
 
@@ -256,7 +275,7 @@ func FuzzTS14_Checkpoint(f *testing.F) {
 		f.Add(b)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		if c, err := ParseCheckpoint(b, v); err == nil && (c.Size > maxSize || c.Origin != origin) {
+		if c, err := ParseCheckpoint(b, v); err == nil && (c.Size() > maxSize || c.Origin() != origin) {
 			t.Errorf("accepted checkpoint out of range: %+v", c)
 		}
 	})

@@ -107,19 +107,22 @@ func ReadKey(r io.Reader) (note.Verifier, error) {
 // When the strict parser refuses the note, the function opens the note with
 // the same key. If note.Open says that the signature of the key is wrong, the
 // result is ErrSignature (not verified). The result is also ErrSignature if
-// no signature line is from the key, for example in a note signed by another
+// no signature line is from the key. An example is a note signed by another
 // key. Every other result is ErrCheckpoint (an input error). These are text
 // that is not a note, a second signature line, and a bad body. A size that is
 // not a 64-bit number also gives ErrCheckpoint. A size above 2^48 gives
 // ErrRange. The first fault that note.Open finds decides between ErrSignature
 // and ErrCheckpoint. A note that is both malformed and badly signed can give
 // either.
-func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
+//
+// The value keeps its own copy of the note bytes. A later change of b does not
+// change the value. The value also holds the key hash of v.
+func ParseCheckpoint(b []byte, v note.Verifier) (Checkpoint, error) {
 	if v == nil {
-		return verifier.Checkpoint{}, ErrKey
+		return Checkpoint{}, ErrKey
 	}
 	if len(b) > MaxNoteBytes {
-		return verifier.Checkpoint{}, ErrTooLarge
+		return Checkpoint{}, ErrTooLarge
 	}
 	c, err := verifier.ParseCheckpoint(b, v.Name(), v)
 	if err != nil {
@@ -127,25 +130,33 @@ func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
 		var invalid *note.InvalidSignatureError
 		var unverified *note.UnverifiedNoteError
 		if errors.As(nerr, &invalid) || errors.As(nerr, &unverified) {
-			return verifier.Checkpoint{}, ErrSignature
+			return Checkpoint{}, ErrSignature
 		}
-		return verifier.Checkpoint{}, ErrCheckpoint
+		return Checkpoint{}, ErrCheckpoint
 	}
 	if c.Size > maxSize {
-		return verifier.Checkpoint{}, ErrRange
+		return Checkpoint{}, ErrRange
 	}
-	return c, nil
+	return Checkpoint{
+		origin:  c.Origin,
+		size:    c.Size,
+		root:    c.Root,
+		keyHash: v.KeyHash(),
+		note:    bytes.Clone(b),
+	}, nil
 }
 
-// Checkpoint is a checkpoint note that ReadCheckpoint accepted. ReadCheckpoint
-// calls ParseCheckpoint. A value holds the origin, the size, the root and the
-// note bytes. Only ReadCheckpoint makes a value that is not zero. The fields
-// are not exported, so code outside the package cannot change a value.
+// Checkpoint is a checkpoint note that ParseCheckpoint accepted. A value holds
+// the origin, the size, the root, the key hash of the verifier and the note
+// bytes. Only ParseCheckpoint and ReadCheckpoint make a value that is not
+// zero. The fields are not exported, so code outside the package cannot change
+// a value.
 type Checkpoint struct {
-	origin string
-	size   uint64
-	root   [32]byte
-	note   []byte
+	origin  string
+	size    uint64
+	root    [32]byte
+	keyHash uint32
+	note    []byte
 }
 
 // Origin returns the origin of the note.
@@ -163,18 +174,13 @@ func (c Checkpoint) Note() []byte { return bytes.Clone(c.note) }
 
 // ReadCheckpoint reads a note with the size cap, then calls ParseCheckpoint.
 // The value is the only form of checkpoint that Inclusion accepts. The value
-// keeps the bytes of the read with no copy. A reader must not keep the buffer
-// after Read returns (io.Reader), so no other code holds them.
+// is the value of ParseCheckpoint, with its own copy of the bytes.
 func ReadCheckpoint(r io.Reader, v note.Verifier) (Checkpoint, error) {
 	b, err := readCapped(r, MaxNoteBytes)
 	if err != nil {
 		return Checkpoint{}, err
 	}
-	c, err := ParseCheckpoint(b, v)
-	if err != nil {
-		return Checkpoint{}, err
-	}
-	return Checkpoint{origin: c.Origin, size: c.Size, root: c.Root, note: b}, nil
+	return ParseCheckpoint(b, v)
 }
 
 // Event holds the received bytes of an event and their hash.
