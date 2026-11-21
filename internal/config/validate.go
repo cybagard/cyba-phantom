@@ -743,8 +743,10 @@ func checkCacheDir(l *loader, raw string) string { return checkStorePath(l, raw)
 
 // cacheConflict checks the acme.cache_dir value p (SEC-21). It returns a
 // detail if p is in or above a directory that the sensor uses for other
-// files. It compares the path text only. It folds A-Z with foldASCII. A key
-// that is not in vals failed its own check, so it is skipped.
+// files. It also returns a detail if p is a state file, or store.path or a
+// file of it. A path in one of them also gets a detail. It compares the
+// path text only. It folds A-Z with foldASCII. A key that is not in vals
+// failed its own check, so it is skipped.
 func cacheConflict(root string, vals map[string]Value, p string) string {
 	p = foldASCII(p)
 	if n := keyClash(p, vals, true, "tlog.dir", "bundle.path"); n != "" {
@@ -753,17 +755,20 @@ func cacheConflict(root string, vals map[string]Value, p string) string {
 	if n := dirClash(p, root, true); n != "" {
 		return "the path must not be in or above " + n
 	}
-	if f := fileClash(p, root, true); f != "" {
+	if f := fileClash(p, root); f != "" {
 		return "the path must not be or be in " + f
+	}
+	if storeNameClash(p, vals) {
+		return "the path must not be or be in store.path or a file of it"
 	}
 	return ""
 }
 
 // tlogConflict checks the tlog.dir value p (SEC-11). It returns a detail if p
 // is in or above the path of another key or a state directory. It also returns
-// a detail if p is a state file. It compares the path text only. It folds A-Z
-// with foldASCII. A key that is not in vals failed its own check, so it is
-// skipped.
+// a detail if p is a state file, a file of store.path, or in one of them. It
+// compares the path text only. It folds A-Z with foldASCII. A key that is not
+// in vals failed its own check, so it is skipped.
 func tlogConflict(root string, vals map[string]Value, p string) string {
 	p = foldASCII(p)
 	if n := keyClash(p, vals, true, "acme.cache_dir", "bundle.path", "store.path"); n != "" {
@@ -772,8 +777,11 @@ func tlogConflict(root string, vals map[string]Value, p string) string {
 	if n := dirClash(p, root, true); n != "" {
 		return "the path must not be in or above " + n
 	}
-	if f := fileClash(p, root, false); f != "" {
-		return "the path must not be " + f
+	if f := fileClash(p, root); f != "" {
+		return "the path must not be or be in " + f
+	}
+	if storeNameClash(p, vals) {
+		return "the path must not be or be in a file of store.path"
 	}
 	return ""
 }
@@ -820,15 +828,40 @@ func dirClash(p, root string, above bool) string {
 	return ""
 }
 
-// fileClash returns the first name in stateFiles that p is. If below is set,
-// it also checks if p is below the file. The caller folds p.
-func fileClash(p, root string, below bool) string {
+// fileClash returns the first name in stateFiles that p is or is in. The
+// caller folds p.
+func fileClash(p, root string) string {
 	for _, f := range stateFiles {
-		if s := foldASCII(filepath.Join(root, f)); p == s || below && inDirText(p, s) {
+		if inDirText(p, foldASCII(filepath.Join(root, f))) {
 			return f
 		}
 	}
 	return ""
+}
+
+// storeSuffixes are the endings that the store adds to the store.path value
+// for its own files. They are the database, the SQLite side files, and the
+// temporary database with its side files. The store checks all of them at open.
+var storeSuffixes = []string{
+	"", "-wal", "-shm", "-journal",
+	".new", ".new-wal", ".new-shm", ".new-journal",
+}
+
+// storeNameClash reports whether p is, or is in, the store.path value in vals
+// with one of storeSuffixes added. The caller folds p. If store.path is not in
+// vals, it failed its own check, so it returns false.
+func storeNameClash(p string, vals map[string]Value) bool {
+	v, ok := vals["store.path"]
+	if !ok {
+		return false
+	}
+	s := foldASCII(v.Str)
+	for _, suffix := range storeSuffixes {
+		if inDirText(p, s+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // foldASCII changes the letters A-Z in s to a-z. No other byte changes, so a
@@ -867,7 +900,7 @@ func checkBundlePath(l *loader, raw string) string {
 	if n := dirClash(dir, l.stateRoot, false); n != "" {
 		return "the directory must not be in " + n
 	}
-	if f := fileClash(dir, l.stateRoot, true); f != "" {
+	if f := fileClash(dir, l.stateRoot); f != "" {
 		return "the directory must not be or be in " + f
 	}
 	return ""
@@ -875,7 +908,8 @@ func checkBundlePath(l *loader, raw string) string {
 
 // bundleConflict checks p, a bundle.path value. It returns a detail if the
 // directory of p is in or above tlog.dir or acme.cache_dir. It also returns
-// a detail if the directory is store.path, a SQLite side file of it, or in one.
+// a detail if the directory is store.path, a file of it, or in one. The files
+// are the SQLite side files and the temporary database with its side files.
 // It returns a detail if p is store.path (SEC-23). It compares the path text
 // only. It folds the letters A-Z to a-z with foldASCII and no other letter.
 // A key that is not in vals failed its own check, so it is skipped.
@@ -886,14 +920,11 @@ func bundleConflict(vals map[string]Value, p string) string {
 		return "the directory must not be in or above " + n
 	}
 	if v, ok := vals["store.path"]; ok {
-		s := foldASCII(v.Str)
-		if s == p {
+		if foldASCII(v.Str) == p {
 			return "the path must not be store.path"
 		}
-		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-			if inDirText(dir, s+suffix) {
-				return "the directory must not be or be in store.path or a file of it"
-			}
+		if storeNameClash(dir, vals) {
+			return "the directory must not be or be in store.path or a file of it"
 		}
 	}
 	return ""
@@ -1014,8 +1045,9 @@ func inDirText(p, d string) bool {
 	return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, string(filepath.Separator))+string(filepath.Separator))
 }
 
-// storeConflict returns a detail if the store.path value p is in a directory that the sensor
-// uses for other files, or is one of its state files (SEC-20). It compares the path text only.
+// storeConflict checks the store.path value p. It returns a detail if p is in
+// a directory that the sensor uses for other files (SEC-20). It also returns
+// a detail if p is a state file or is in one. It compares the path text only.
 // It folds the letters A-Z to a-z with foldASCII.
 // A key that is not in vals failed its own check, so it is skipped.
 func storeConflict(root string, vals map[string]Value, p string) string {
@@ -1026,8 +1058,8 @@ func storeConflict(root string, vals map[string]Value, p string) string {
 	if n := dirClash(p, root, false); n != "" {
 		return "the path must not be in " + n
 	}
-	if f := fileClash(p, root, false); f != "" {
-		return "the path must not be " + f
+	if f := fileClash(p, root); f != "" {
+		return "the path must not be or be in " + f
 	}
 	return ""
 }
