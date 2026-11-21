@@ -5,7 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"math"
-	"math/big"
+	"math/bits"
 	"slices"
 	"strconv"
 )
@@ -46,11 +46,11 @@ func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	// A change of the sum at a rowid. A big number holds the sum of any count
+	// A change of the sum at a rowid. A wide number holds the sum of any count
 	// of changes. The result is clamped when a segment is made.
 	type change struct {
 		at int64
-		d  *big.Int
+		d  int128
 	}
 	var changes []change
 	for rows.Next() {
@@ -58,9 +58,9 @@ func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 		if err := rows.Scan(&from, &to, &j); err != nil {
 			return nil, err
 		}
-		changes = append(changes, change{from, big.NewInt(j)})
+		changes = append(changes, change{from, wide(j)})
 		if to < math.MaxInt64 {
-			changes = append(changes, change{to + 1, new(big.Int).Neg(big.NewInt(j))})
+			changes = append(changes, change{to + 1, wide(j).neg()})
 		}
 	}
 	if err := rows.Err(); err != nil || len(changes) == 0 {
@@ -68,9 +68,9 @@ func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 	}
 	slices.SortFunc(changes, func(a, b change) int { return cmp.Compare(a.at, b.at) })
 	js := &jumpSums{}
-	lo, sum := int64(math.MinInt64), new(big.Int)
+	lo, sum := int64(math.MinInt64), int128{}
 	cut := func(hi int64) {
-		s := clamp(sum)
+		s := sum.clamp()
 		js.low = min(js.low, s)
 		if n := len(js.segs); n > 0 && js.segs[n-1].sum == s {
 			js.segs[n-1].hi = hi
@@ -84,7 +84,7 @@ func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 			cut(e - 1)
 		}
 		for ; i < len(changes) && changes[i].at == e; i++ {
-			sum.Add(sum, changes[i].d)
+			sum = sum.add(changes[i].d)
 		}
 		lo = e
 	}
@@ -92,12 +92,31 @@ func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 	return js, nil
 }
 
-// clamp returns v, or the nearest end of the range of int64.
-func clamp(v *big.Int) int64 {
+// An int128 is a number of 128 bits in two's complement form. It holds the sum
+// of any count of j, with no wrap.
+type int128 struct {
+	hi int64
+	lo uint64
+}
+
+func wide(j int64) int128 { return int128{j >> 63, uint64(j)} }
+
+func (a int128) add(b int128) int128 {
+	lo, carry := bits.Add64(a.lo, b.lo, 0)
+	return int128{a.hi + b.hi + int64(carry), lo}
+}
+
+func (a int128) neg() int128 {
+	lo, carry := bits.Add64(^a.lo, 1, 0)
+	return int128{^a.hi + int64(carry), lo}
+}
+
+// clamp returns the number, or the nearest end of the range of int64.
+func (a int128) clamp() int64 {
 	switch {
-	case v.IsInt64():
-		return v.Int64()
-	case v.Sign() < 0:
+	case a.hi == 0 && a.lo <= math.MaxInt64, a.hi == -1 && a.lo > math.MaxInt64:
+		return int64(a.lo)
+	case a.hi < 0:
 		return math.MinInt64
 	}
 	return math.MaxInt64
