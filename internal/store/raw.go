@@ -32,12 +32,24 @@ const (
 		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts > ? AND id <= ? AND (" + rawIndexWhere + ") " +
 		"ORDER BY ts LIMIT ?)"
 
+	// The segment forms of the two clear statements have the ends of a rowid
+	// segment. They do not have the bound `id <= ?`. Their values are the
+	// cutoff, the first id, the last id and the limit.
+	clearPastSegSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
+		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts < ? AND id BETWEEN ? AND ? AND (" + rawIndexWhere + ") " +
+		"ORDER BY ts LIMIT ?)"
+	clearFutureSegSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
+		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts > ? AND id BETWEEN ? AND ? AND (" + rawIndexWhere + ") " +
+		"ORDER BY ts LIMIT ?)"
+
 	// clearTopSQL reads the largest event id.
 	clearTopSQL = "SELECT coalesce(max(id), 0) FROM event"
 
 	// deleteRawSQL deletes old rows of the kinds that have no roll-up. It uses
-	// event_kind_ts.
-	deleteRawSQL = "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE kind IN ('refused', 'beacon') AND ts < ? LIMIT ?)"
+	// event_kind_ts. deleteRawSegSQL is the form for one rowid segment.
+	deleteRawSQL    = "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE kind IN ('refused', 'beacon') AND ts < ? LIMIT ?)"
+	deleteRawSegSQL = "DELETE FROM event WHERE id IN (SELECT id FROM event INDEXED BY event_kind_ts " +
+		"WHERE kind IN ('refused', 'beacon') AND ts < ? AND id BETWEEN ? AND ? LIMIT ?)"
 
 	// The mint statements use the primary key. mintNextSQL finds the next
 	// set_id after a position. mintUnitSQL finds the oldest unit of a set_id
@@ -102,6 +114,12 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // rows younger than the step minus 1 h. With a stored value, the rows up to
 // that value plus 1 h keep their fields.
 //
+// A row in an event range of a clock_jump row has its ts with the correction
+// of that row (ADR-043). The step reads each rowid segment with its own cutoff
+// and its own line. Each is the value minus the sum of j of the segment. Both
+// parts keep the bound `top`. In a segment, the last id is the lesser of `top`
+// and the end of the segment.
+//
 // With days outside 1 to 30, a zero tPriv, or no `wall`, the step runs no
 // statement. It returns an error.
 func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retentionStep {
@@ -121,30 +139,45 @@ func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retenti
 		n := 0
 		if !future {
 			var err error
-			if n, err = execCount(ctx, tx, memFields, clearPastSQL, cutoff, top, limit); err != nil || n == limit {
+			if n, err = clearPart(ctx, tx, clearPastSQL, clearPastSegSQL, cutoff, top, limit); err != nil || n == limit {
 				return n, err
 			}
 			future = true
 		}
-		m, err := execCount(ctx, tx, memFields, clearFutureSQL, line, top, limit-n)
+		m, err := clearPart(ctx, tx, clearFutureSQL, clearFutureSegSQL, line, top, limit-n)
 		return n + m, err
 	}
 }
 
+// clearPart runs one part of the field clear, with the plain statement or with
+// the statement of one segment. at is the cutoff or the future line.
+func clearPart(ctx context.Context, tx *sql.Tx, plain, seg string, at, top int64, limit int) (int, error) {
+	return eventRows.each(ctx, tx, at, limit, func(cut int64, s *segment, lim int) (int, error) {
+		if s == nil {
+			return execCount(ctx, tx, memFields, plain, cut, top, lim)
+		}
+		return execCount(ctx, tx, memFields, seg, cut, s.lo, min(s.hi, top), lim)
+	})
+}
+
 // newRawDeleteStep returns the step that deletes the refused and beacon rows
-// with ts before the cutoff (SEC-39). The cutoff is tDel minus `days` x 24 h.
-// It rolls up no row. It reads no clock. Each call deletes at most `limit`
-// rows and returns their count. With days outside 1 to 30, or a zero tDel, the
-// step runs no statement and returns an error.
+// with ts before the cutoff (SEC-39). The cutoff is S minus `days` x 24 h. The
+// caller gives S as tDel. A row in an event range of a clock_jump row has its
+// ts with the correction of that row (ADR-043). It rolls up no row. It reads no
+// clock. Each call deletes at most `limit` rows and returns their count. With
+// days outside 1 to 30, or a zero tDel, the step runs no statement and returns
+// an error.
 func newRawDeleteStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
 	if !ok {
 		return rollupRefused
 	}
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		return execCount(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
+		return rawCorrection.exec(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
 	}
 }
+
+var rawCorrection = &correction{eventRows, deleteRawSegSQL}
 
 // mintRanges returns the unit ranges, both ends included, of the units before
 // the unit cu. A unit is before cu when cu minus the unit is above 0. The
