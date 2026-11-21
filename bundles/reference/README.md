@@ -82,7 +82,7 @@ The file name must end in `.cbnd`.
 The config requires this path to be below the state directory.
 The directory must not be the state directory itself.
 It must not be the keys directory or the checkpoints directory, or be in one of them.
-The config refuses more paths, for example a path in the log directory.
+The config refuses more paths, for example a path in `tlog.dir`.
 The rules are in `checkBundlePath` and `bundleConflict` in `internal/config/validate.go`.
 The signature has the same name, with `.sig` in place of `.cbnd`.
 Give each file the mode `0600`.
