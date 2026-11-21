@@ -21,7 +21,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint tidy stelint-report check trace stamp mirror-diff dco coverage fill perf perf-inner fixtures mutate clean
+.PHONY: all build test lint tidy stelint-report check trace stamp mirror-diff dco coverage fill coldstart perf perf-inner fixtures mutate clean
 
 # The all target runs the checks of the ci workflow that need no special
 # setup. The coverage target replaces the test target, because it runs the
@@ -184,6 +184,21 @@ fill:
 		grep -q -- "--- PASS: $$t " "$$log" || { echo "fill FAIL: $$t did not pass"; exit 1; }; \
 	done; \
 	echo "fill: the fill tests passed and none skipped"
+
+# T-I-03 (NFR-05): the cold-start test builds the binary and runs it with a
+# state directory at /var/lib/phantom. It needs root and a free /var/lib/phantom.
+# Without them it skips. The coldstart job of CI runs it as root in a container.
+# The target is not part of all. It fails when go test fails, a test skips or
+# the named test lacks a PASS line.
+COLDSTART_TEST := TestTI03_ColdStartBinary
+coldstart:
+	@log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
+	$(GO) test -race -timeout 5m -count=1 -v -run '^$(COLDSTART_TEST)$$' ./cmd/phantom >"$$log" 2>&1; rc=$$?; \
+	cat "$$log"; \
+	[ "$$rc" -eq 0 ] || { echo "coldstart FAIL: go test exited with status $$rc"; exit 1; }; \
+	! grep -q -- '--- SKIP' "$$log" || { echo "coldstart FAIL: a test skipped (it needs root and a free /var/lib/phantom)"; exit 1; }; \
+	grep -q -- "--- PASS: $(COLDSTART_TEST) " "$$log" || { echo "coldstart FAIL: $(COLDSTART_TEST) did not pass"; exit 1; }; \
+	echo "coldstart: the cold-start test passed and did not skip"
 
 # T-U-06: write the sha256 values of the hand-written canonical text into
 # internal/event/testdata. T-U-12: write the signed note into the golden

@@ -1412,6 +1412,7 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 // TestTI03_ColdStartBinary builds the binary and starts it with a cached certificate in /var/lib/phantom and a CA
 // that no one answers. A TLS handshake with the cached certificate must work at most 2 s after the process start.
 // SIGTERM must end the process with exit 0 (NFR-05). The test needs root, because /var/lib/phantom is the state directory.
+// Run it with make coldstart. That target fails when the test skips.
 func TestTI03_ColdStartBinary(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("the test must run as root to make the state directory")

@@ -11,8 +11,8 @@
 #     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
 #     equal to the go line is stripped by go mod tidy), downloaded with
 #     Go's checksum verification; no setup-go action, zero dependencies;
-#   - one container image: the oracle job runs in golang:1.27.3 from
-#     Docker Hub, pinned by digest (the base image of .devcontainer);
+#   - one container image: the oracle and coldstart jobs run in golang:1.27.3
+#     from Docker Hub, pinned by digest (the base image of .devcontainer);
 #   - gate checkers (dco, trace, mirror-diff) are built from an explicit
 #     checkout of the PR base branch (a ref-less checkout on
 #     pull_request would yield the merge ref — the PR's own changes)
@@ -37,13 +37,15 @@
 #   - test: go test -race and the coverage gate;
 #   - fill: the T-I-16 fill tests on a small tmpfs; a skip fails the job;
 #   - oracle: the tar reader oracle, in the pinned golang container;
+#   - coldstart: the T-I-03 cold-start test, as root in the same container; a
+#     skip fails the job;
 #   - trace: the C10 matrix and the sync stamp;
 #   - trace-tests: a Go test or a marker for each test ID of the milestone;
 #   - mirror-diff: the constitution table;
 #   - build: T-P-07, a reproducible, static, sized build under a cgroup budget,
 #     and the release build of the two commands.
-# The test, fill, oracle and build jobs share one checkout step through a YAML
-# anchor.
+# The test, fill, oracle, coldstart and build jobs share one checkout step
+# through a YAML anchor.
 # The dco, trace, trace-tests and mirror-diff jobs share their base-checkout
 # and gate-source steps through YAML anchors. The lint job has its own
 # checkout.
@@ -221,6 +223,27 @@ jobs:
 
       - name: reader oracle (GNU tar, Python)
         run: go test -race -count=1 -v -run '^TestTS19ReaderOracle$' ./internal/bundle/
+
+  coldstart:
+    # T-I-03 (NFR-05): the cold-start test needs root and a free
+    # /var/lib/phantom. The runner user is not root, so the test job skips it.
+    # The job runs as root in the container of the oracle job, at the same
+    # digest. Bump both with .devcontainer. make coldstart fails on a skip.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b
+    steps:
+      - *checkout
+
+      - name: Trust the checkout for git
+        # The checkout belongs to another user than root. Then git refuses
+        # it, and go build fails when it stamps the version data. Trust only
+        # this directory, not all directories.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cold-start test (no skip allowed)
+        run: make coldstart
 
   trace:
     # Checker-from-base: the trace tool is built from the PR base branch
