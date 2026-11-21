@@ -1428,9 +1428,11 @@ func tlogLines(name, want string) int {
 }
 
 // TestTS11_StorePathLoad checks that the load refuses a store.path in a
-// directory of another key, or a state file. The error names store.path.
-// A path in tlog.dir also gives an error on tlog.dir. Each row runs with
-// the other key at its default and set (SEC-20).
+// directory of another key. It also refuses a store.path that is a state file
+// or is in one. The error names store.path. A path in tlog.dir also gives an
+// error on tlog.dir. A path equal to acme.cache_dir also gives an error on
+// acme.cache_dir. Each row runs with the other key at its default and set
+// (SEC-20).
 func TestTS11_StorePathLoad(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	rows := []struct {
@@ -1495,7 +1497,7 @@ func TestTS11_StorePathLoad(t *testing.T) {
 			case !strings.Contains(err.Error(), "store.path at PHANTOM_STORE_PATH: ") || !strings.Contains(err.Error(), r.want):
 				t.Errorf("got %v, want an error on store.path with %q", err, r.want)
 			case strings.Count(err.Error(), "\n") != tlogLines(r.name, r.want):
-				t.Errorf("got %v, want no error on another key but tlog.dir", err)
+				t.Errorf("got %v, want no error on a key other than tlog.dir or acme.cache_dir", err)
 			}
 		})
 	}
@@ -1578,8 +1580,9 @@ func TestTS11_TLogDirText(t *testing.T) {
 }
 
 // TestTS11_TLogDirLoad checks that the load refuses a tlog.dir in or above the
-// path of another key. It also refuses a state file. The compare folds A-Z.
-// The error names tlog.dir (SEC-11).
+// path of another key. It also refuses a tlog.dir that is a state file or a
+// file of store.path, or is in one. The compare folds A-Z. The error names
+// tlog.dir (SEC-11).
 func TestTS11_TLogDirLoad(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	rows := []struct {
