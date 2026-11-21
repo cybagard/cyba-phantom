@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"math"
-	"math/bits"
 	"slices"
 	"strconv"
 )
@@ -102,13 +101,15 @@ type int128 struct {
 func wide(j int64) int128 { return int128{j >> 63, uint64(j)} }
 
 func (a int128) add(b int128) int128 {
-	lo, carry := bits.Add64(a.lo, b.lo, 0)
-	return int128{a.hi + b.hi + int64(carry), lo}
+	sum := int128{a.hi + b.hi, a.lo + b.lo}
+	if sum.lo < a.lo { // the low words wrapped: carry 1 to the high word
+		sum.hi++
+	}
+	return sum
 }
 
 func (a int128) neg() int128 {
-	lo, carry := bits.Add64(^a.lo, 1, 0)
-	return int128{^a.hi + int64(carry), lo}
+	return int128{^a.hi, ^a.lo}.add(int128{0, 1})
 }
 
 // clamp returns the number, or the nearest end of the range of int64.
