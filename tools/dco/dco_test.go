@@ -14,8 +14,8 @@ const me = "67512030+cybagard@users.noreply.github.com"
 // other is an address the identity rule refuses (reserved test domain).
 const other = "other@example.com"
 
-// isolate makes git ignore the user and system configuration, so that a
-// setting of the user cannot change the output of git.
+// isolate makes git ignore the user and system configuration. A user setting
+// then cannot change the output.
 var isolate = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
 
 // TestMain sets isolate for every git that dco runs in the tests.
@@ -187,8 +187,8 @@ func runOn(t *testing.T, env []string, msg string) (int, string, string) {
 	return code, out, strings.TrimSpace(git(t, dir, "rev-parse", "--short=12", "HEAD"))
 }
 
-// signoff is a whole message: a subject, an empty line, and a trailer block
-// with one sign-off at the noreply address.
+// signoff is a whole message. It has a subject, an empty line, and a trailer
+// block with one sign-off at the noreply address.
 const signoff = "subject\n\nSigned-off-by: t <" + me + ">\n"
 
 // failsWith commits msg (by the author and the committer set in env) and
@@ -366,8 +366,8 @@ var goodObjs = map[string]commitObject{
 	"fedcba9876543210": {header: []byte(stdHeader)},
 }
 
-// A commit with no raw object fails, and so does one with no header or a
-// message that is not valid UTF-8. All are identity failures, never a pass.
+// A commit with no raw object fails. So does a commit with no header, or with
+// a message that is not valid UTF-8. All are identity failures, never a pass.
 // The output holds no address.
 func TestCheckFailsClosed(t *testing.T) {
 	for name, objs := range map[string]map[string]commitObject{
@@ -1200,8 +1200,9 @@ func TestHeaderFails(t *testing.T) {
 	}
 }
 
-// These headers pass: the form of a GitHub squash merge, an SSH signature with
-// the GitHub committer, the key gpgsig-sha256, a root commit and a merge commit.
+// These headers pass: a GitHub squash merge form and an SSH signature, both
+// with the GitHub committer. Also these pass: the key gpgsig-sha256, a root
+// commit and a merge commit.
 func TestHeaderPasses(t *testing.T) {
 	sha := strings.Replace(pgpSig, "gpgsig ", "gpgsig-sha256 ", 1)
 	for name, header := range map[string]string{
@@ -1249,8 +1250,8 @@ func TestSigOKBase64Padding(t *testing.T) {
 	}
 }
 
-// The author and committer values follow the form, the character list and the
-// no-at-sign rule, and the address rule, whatever git log shows.
+// The author and committer values follow the form and the address rule,
+// whatever git log shows. The name follows the character list.
 func TestIdentLineOK(t *testing.T) {
 	const gh = "GitHub <noreply@github.com> 1 -0700"
 	for _, c := range []struct {

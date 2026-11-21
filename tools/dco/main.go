@@ -93,13 +93,13 @@
 //     committer line. The gpgsig and gpgsig-sha256 lines come after the
 //     committer line, in any order, each at most once. Any other count or
 //     order fails.
-//   - A gpgsig or gpgsig-sha256 field passes only when the committer
-//     address of the same header is the GitHub committer address, without
-//     case. With the maintainer as committer, a signature field fails.
+//   - A gpgsig or gpgsig-sha256 field needs the GitHub committer address in
+//     the committer line of the same header, without case. With the
+//     maintainer as committer, a signature field fails.
 //   - A tree or parent value is a full hash: 40 or 64 lowercase hex digits.
-//   - An author or committer value has this form: the name, one space, "<",
-//     the address, ">", one space, the time, one space and the zone. The
-//     name is not empty. It does not start or end with a space or a TAB.
+//   - An author or committer value has four parts: the name, the address,
+//     the time and the zone. The address is in "<" and ">". One space is
+//     between the parts. The name is not empty. It does not start or end with a space or a TAB.
 //     The name and the address hold no "<" or ">". The time is "0", or up
 //     to 16 digits that do not start with "0". The zone is "+" or "-" and 4
 //     digits. The name passes the character list and holds no "@". The
