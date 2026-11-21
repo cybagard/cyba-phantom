@@ -565,12 +565,12 @@ func TestEncodingLineFails(t *testing.T) {
 		}
 	})
 	// Git shows an empty %e for an empty value, so only the header shows it.
-	// A continuation line after an encoding line makes the parse fail.
+	// A line with no space makes the parse fail.
 	for name, extra := range map[string]string{
-		"empty value":                       "encoding \n",
-		"two encoding lines":                "encoding \nencoding UTF-7\n",
-		"encoding line and continuation":    "encoding UTF-8\n more\n",
-		"empty encoding line and continued": "encoding \n more\n",
+		"empty value":                        "encoding \n",
+		"two encoding lines":                 "encoding \nencoding UTF-7\n",
+		"encoding line and continuation":     "encoding UTF-8\n more\n",
+		"empty encoding line, no space line": "encoding \nx\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir, hash := forgeCommit(t, extra, signoff, "--literally")
@@ -1181,6 +1181,8 @@ func TestHeaderFails(t *testing.T) {
 		"gpgsig field":                  ghHeader + pgpSig,
 		"gpgsig-sha256 field":           ghHeader + sha,
 		"both signature fields":         ghHeader + sha + pgpSig,
+		"gpgsig field, one line":        ghHeader + "gpgsig x\n",
+		"gpgsig-sha256 field, one line": ghHeader + "gpgsig-sha256 x\n",
 	} {
 		t.Run(name, func(t *testing.T) { failsHeader(t, header) })
 	}
