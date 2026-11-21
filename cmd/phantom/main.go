@@ -33,7 +33,22 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Environ(), os.Stdout, os.Stderr))
 }
 
-// run returns the exit code: 0 for a valid config, 1 for an invalid config, 2 for a usage error.
+// run returns the exit code of the process.
+//
+// Exit code 2 means a usage error: the arguments are not one config path with
+// an optional --check flag.
+//
+// Exit code 1 means one of these causes:
+//   - The config file does not load, or its content is not valid.
+//   - In serve mode, the start fails, or a socket cannot open.
+//   - In serve mode, the close at stop does not end in its time bound.
+//   - In serve mode, a serve call ended with an error.
+//
+// Exit code 0 means one of these causes:
+//   - With --check, the config is valid.
+//   - In serve mode, a stop ended with no failure.
+//
+// In serve mode, the code is the code of serve. See serveWith for the detail.
 func run(args, env []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("phantom", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // The flag package prints a flag name raw, so run prints a fixed usage line.
