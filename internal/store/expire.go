@@ -86,10 +86,11 @@ func newGatedExpireStep(q string, cost int, tDel time.Time, days int,
 }
 
 // newEventExpireStep deletes the event rows of each kind with ts before the
-// cutoff (SEC-39). days is store.retention_days.events. A chunk deletes no row
-// with a stored ts at or after the start of the day that the day step works on
-// next (see rollupWorkDay). This holds for each sum of j. The day step can stop
-// early with a request row left. With no such day, the chunk has no such end.
+// cutoff (SEC-39). days is store.retention_days.events. The day step works on
+// one day next (see rollupWorkDay). A chunk keeps each row with a stored ts at
+// or after the start of that day. This holds for each sum of j. The day step
+// can stop early with a request row left. With no such day, the chunk has no
+// such end.
 //
 // With no clock_jump range, the step runs the plain statement with the cutoff
 // capped at that start. The behavior is the same as before the correction.
