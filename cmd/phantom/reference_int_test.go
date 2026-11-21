@@ -13,11 +13,11 @@ import (
 )
 
 // The base64 text of a signing seed is 43 characters and "=" (32 bytes). The
-// text of a private key is 86 characters and "==" (64 bytes). These are the
-// seed and the public key. A longer run of base64 characters that ends in such
-// a tail is found too. The scan is by hand and not a regular expression. The
-// test reads the build output of the tree. A repeat count of 43 is slow in
-// regexp.
+// text of a private key is 86 characters and "==" (64 bytes). A private key is
+// the seed and then the public key. A longer run of base64 characters that ends
+// in such a tail is found too. The scan is by hand and not a regular
+// expression. The test reads the build output of the tree. A repeat count of 43
+// is slow in regexp.
 const (
 	seedChars = 43
 	privChars = 86
@@ -133,11 +133,11 @@ func TestTU29_NoReferenceSigningKeyInModule(t *testing.T) {
 
 // TestTU29_KeyScanFindsPlantedSeed checks the key scan (T-U-29, SEC-42). A tree
 // in a temporary directory holds the base64 text of a seed. The public key of
-// the seed is the reference key of the test trust set. The scan finds the file
-// in each of these forms. The 32 bytes alone. A longer line of text. The 64
-// bytes of a private key. A longer run of base64 characters. The scan does
-// not find these. A seed of another key. A file below .git. A seed in raw
-// bytes. A run with the wrong length.
+// the seed is the reference key of the test trust set. The scan finds the seed
+// alone and in a longer line. It also finds a 64-byte private key and a seed at
+// the end of a longer base64 run. It does not find a seed of another key or a
+// file below .git. It does not find raw seed bytes or a run of the wrong
+// length.
 func TestTU29_KeyScanFindsPlantedSeed(t *testing.T) {
 	seed := devKey(t).Seed()
 	priv := ed25519.NewKeyFromSeed(seed)

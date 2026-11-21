@@ -139,7 +139,7 @@ func devKey(t *testing.T) ed25519.PrivateKey {
 // new key of the test (devKey) and starts a sensor on it. The trust set has
 // that key as its one key of class reference. The loader clock is `created` +
 // 1 h of the manifest, through the loader seam. The tokens come from the real
-// clock of the handler, so they look future and stale to the ring. See
+// clock of the handler. The ring classes them by the loader clock. See
 // refAgeClass.
 func startReference(t *testing.T) *refRun {
 	t.Helper()
@@ -194,6 +194,8 @@ func startReference(t *testing.T) *refRun {
 // It is stale above 25 h behind it, or when it is future. The tokens come from
 // the window from t0 to t1. known is false when the window does not fix the
 // classes. The unit of a token can then be on either side of a limit.
+// The ring compares whole 10 min units. So a mint time 70 min or more ahead of
+// the loader clock is always future.
 func (r *refRun) refAgeClass(t0, t1 time.Time) (stale, future, known bool) {
 	switch {
 	case t0.Sub(r.clock) >= 70*time.Minute:
