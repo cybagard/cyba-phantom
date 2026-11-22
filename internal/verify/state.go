@@ -261,9 +261,10 @@ func (s *State) read() ([]byte, bool, error) {
 // the key itself.
 //
 // Update parses no note. If the origin is not the name of the state key, it
-// gives ErrState and writes nothing. For a key from ParseKey, the zero value
-// has such an origin. Update also gives ErrState and writes nothing if the key
-// hash is not the key hash of the state key. This holds with equal names too.
+// gives ErrState and writes nothing. The zero value has an empty origin. A key
+// from ParseKey has a name, so Update refuses the zero value. If the key hash
+// is not the key hash of the state key, Update also gives ErrState and writes
+// nothing. This check also applies to two keys with equal names.
 // If the size is 0 and the root is not the empty root, it gives ErrFork and
 // writes nothing.
 //
