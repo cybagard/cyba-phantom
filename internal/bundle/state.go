@@ -88,88 +88,13 @@ func writeState(root *os.Root, st state) error {
 	return writeFile(root, StateName, fmt.Appendf(nil, "{\"version\":%q,\"sha256\":\"%x\",\"class\":%q}\n", st.Version, st.SHA256, classText[st.Class]))
 }
 
-// tempFile is the part of the temporary file that writeTemp uses after it
-// creates that file.
-type tempFile interface {
-	Write([]byte) (int, error)
-	Sync() error
-	Close() error
-}
-
-// wrapTemp is nil, except in a test. A test sets it to make Write, Sync or
-// Close of the temporary file fail. A test also uses it to count Sync calls.
-var wrapTemp func(*os.File) tempFile
-
-// afterTempRemove is nil, except in a test. A test sets it to act after
-// writeTemp removes an old temporary file and before it creates the new one.
-// It gets the name of the temporary file.
-var afterTempRemove func(tmp string)
+// bundleWrite is the write rule of the version state, the transition records
+// and the fetched pair. The mode is 0600 whatever the umask is. The temporary
+// file is "<name>.tmp".
+var bundleWrite = safefile.WriteRule{Mode: 0o600, Temp: safefile.TempFixed, Dir: dirRule}
 
 // writeFile writes data to the file with this name and replaces an old file.
-// It makes a temporary file, with the name and ".tmp", and mode 0600 less the
-// umask. It writes the temporary file, and calls Sync and Close. Then it
-// renames the temporary file to name and calls Sync on the directory. First it
-// removes a temporary file that a crash left, so that file does not block the
-// write. O_EXCL means that the write never follows a symlink at the temporary
-// name.
+// It uses safefile.Replace with bundleWrite. The error holds its cause.
 func writeFile(root *os.Root, name string, data []byte) error {
-	tmp := name + ".tmp"
-	if err := writeTemp(root, tmp, data); err != nil {
-		return err
-	}
-	if err := root.Rename(tmp, name); err != nil {
-		_ = root.Remove(tmp)
-		return err
-	}
-	return syncDir(root)
-}
-
-// writeTemp makes the temporary file tmp with the data, as writeFile says. It
-// removes the file again when a step after the create fails.
-func writeTemp(root *os.Root, tmp string, data []byte) error {
-	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	if afterTempRemove != nil {
-		afterTempRemove(tmp)
-	}
-	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	var w tempFile = f
-	if wrapTemp != nil {
-		w = wrapTemp(f)
-	}
-	_, err = w.Write(data)
-	if err == nil {
-		err = w.Sync()
-	}
-	if cerr := w.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		_ = root.Remove(tmp)
-	}
-	return err
-}
-
-// beforeSyncDir is nil, except in a test. A test sets it to see each call of
-// syncDir.
-var beforeSyncDir func()
-
-// syncDir calls Sync on the directory of the root.
-func syncDir(root *os.Root) error {
-	if beforeSyncDir != nil {
-		beforeSyncDir()
-	}
-	d, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	if cerr := d.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	return safefile.Replace(root, name, data, bundleWrite)
 }

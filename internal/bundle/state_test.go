@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -213,35 +214,43 @@ func TestTS20FirstStart(t *testing.T) {
 	}
 }
 
-// faultyTemp makes one step of the temporary file fail. Close always closes
-// the real file, so the test leaks no descriptor.
-type faultyTemp struct {
-	f    *os.File
-	step string
-}
-
 var errInjected = errors.New("injected write fault")
 
-func (w faultyTemp) Write(b []byte) (int, error) {
-	if w.step == "write" {
-		return 0, errInjected
+// stepFn is the Step hook of the running test, or nil. setStep installs one
+// safefiletest hook for the test and lets the test change this function.
+var (
+	stepFn  func(step, name string) error
+	stepSet bool
+)
+
+// setStep sets the function that the Step hook of safefile calls. It sets the
+// hook itself once for each test. The test restores both at its end.
+func setStep(t *testing.T, fn func(step, name string) error) {
+	t.Helper()
+	if !stepSet {
+		safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
+			if stepFn == nil {
+				return nil
+			}
+			return stepFn(step, name)
+		}})
+		stepSet = true
+		t.Cleanup(func() { stepSet = false })
 	}
-	return w.f.Write(b)
+	stepFn = fn
+	t.Cleanup(func() { stepFn = nil })
 }
 
-func (w faultyTemp) Sync() error {
-	if w.step == "sync" {
-		return errInjected
-	}
-	return w.f.Sync()
-}
-
-func (w faultyTemp) Close() error {
-	err := w.f.Close()
-	if w.step == "close" {
-		return errInjected
-	}
-	return err
+// failStep makes the step on the file name fail with err. The name is that of
+// the temporary file. The step "dirsync" has the name ".".
+func failStep(t *testing.T, step, name string, err error) {
+	t.Helper()
+	setStep(t, func(s, n string) error {
+		if s == step && n == name {
+			return err
+		}
+		return nil
+	})
 }
 
 // T-S-20: a write can fail after writeFile creates the temporary file. Then
@@ -252,8 +261,7 @@ func TestTS20WriteFileFailsAfterCreate(t *testing.T) {
 			dir, r := newDir(t)
 			putState(t, dir, goodRec, 0o600)
 			before := snapshot(t, dir)
-			wrapTemp = func(f *os.File) tempFile { return faultyTemp{f, step} }
-			t.Cleanup(func() { wrapTemp = nil })
+			failStep(t, step, stateTempName, errInjected)
 			if err := r.Record(manifestOf("2030.01.01-1", farExp), sumOf(2), ClassProprietary); !errors.Is(err, errInjected) {
 				t.Errorf("Record: %v", err)
 			}
@@ -267,8 +275,7 @@ func TestTS20WriteFileFailsAfterCreate(t *testing.T) {
 	}
 	t.Run("no fault", func(t *testing.T) {
 		_, r := newDir(t)
-		wrapTemp = func(f *os.File) tempFile { return faultyTemp{f, "none"} }
-		t.Cleanup(func() { wrapTemp = nil })
+		failStep(t, "none", "", errInjected)
 		if err := r.Record(manifestOf("2030.01.01-1", farExp), sumOf(2), ClassProprietary); err != nil {
 			t.Errorf("Record: %v", err)
 		}
@@ -276,6 +283,69 @@ func TestTS20WriteFileFailsAfterCreate(t *testing.T) {
 			t.Error("not healthy after the write")
 		}
 	})
+}
+
+// writeSteps are the steps of a state write, in order. The hook gives the name
+// of the temporary file, and for "dirsync" the name ".".
+var writeSteps = []string{"remove", "create", "write", "sync", "close", "rename", "dirsync"}
+
+// T-S-38: a crash at each step of the state write leaves version.state whole.
+// It holds the old bytes or the new bytes, never a part. The next write works.
+// It leaves no temporary file.
+func TestTS38StateWriteCrashSafe(t *testing.T) {
+	newText := string(fmt.Appendf(nil, "{\"version\":%q,\"sha256\":\"%x\",\"class\":%q}\n", "2030.01.01-1", sumOf(2), "proprietary"))
+	for _, step := range writeSteps {
+		t.Run(step, func(t *testing.T) {
+			dir, r := newDir(t)
+			putState(t, dir, goodRec, 0o600)
+			crashed := false
+			setStep(t, func(s, _ string) error {
+				if s == step {
+					crashed = true
+					return safefiletest.Crash
+				}
+				return nil
+			})
+			err := r.Record(manifestOf("2030.01.01-1", farExp), sumOf(2), ClassProprietary)
+			if !crashed || !errors.Is(err, safefiletest.Crash) {
+				t.Fatalf("Record: %v, crashed %v", err, crashed)
+			}
+			got, rerr := os.ReadFile(filepath.Join(dir, StateName))
+			if rerr != nil || (string(got) != goodRec && string(got) != newText) {
+				t.Errorf("state %q, %v", got, rerr)
+			}
+			if !r.Healthy() {
+				t.Error("the state is not healthy after the crash")
+			}
+			stepFn = nil
+			if err := r.Record(manifestOf("2031.01.01-1", farExp), sumOf(3), ClassProprietary); err != nil {
+				t.Fatalf("next write: %v", err)
+			}
+			if st, err := readState(r.root); err != nil || st.Version != "2031.01.01-1" || st.SHA256 != sumOf(3) {
+				t.Errorf("state after the next write: %+v, %v", st, err)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, stateTempName)); err == nil {
+				t.Error("a temporary file is left")
+			}
+		})
+	}
+}
+
+// T-S-38: the version state file has mode 0600 under umask 0377. The test sets
+// the umask, so no t.Parallel.
+func TestTS38StateWriteModeUnderUmask(t *testing.T) {
+	dir, r := newDir(t)
+	old := syscall.Umask(0o377)
+	defer syscall.Umask(old)
+	if err := r.Record(manifestOf("2030.01.01-1", farExp), sumOf(2), ClassProprietary); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, StateName)); err != nil || fi.Mode() != 0o600 {
+		t.Errorf("state file: %v, %v", fi, err)
+	}
+	if !r.Healthy() {
+		t.Error("the state is not healthy")
+	}
 }
 
 // T-S-20: a failed Rename gives an error and leaves no temporary file. The
@@ -298,22 +368,25 @@ func TestTS20WriteFileRenameFails(t *testing.T) {
 	}
 }
 
-// T-S-20: a symlink can appear at the temporary name after writeTemp removes
-// the old temporary file. Then writeTemp does not follow it. It gives an
-// error, and the file behind the symlink does not change.
+// T-S-20: a symlink can appear at the temporary name after the write removes
+// the old temporary file. Then the write does not follow it. It gives an
+// error, and the file behind the symlink does not change. The hook of the
+// create step runs after the removal.
 func TestTS20WriteTempRefusesSymlink(t *testing.T) {
 	dir, r := newDir(t)
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	afterTempRemove = func(tmp string) {
-		if err := os.Symlink("target", filepath.Join(dir, tmp)); err != nil {
-			t.Error(err)
+	setStep(t, func(step, name string) error {
+		if step == "create" {
+			if err := os.Symlink("target", filepath.Join(dir, name)); err != nil {
+				t.Error(err)
+			}
 		}
-	}
-	t.Cleanup(func() { afterTempRemove = nil })
-	if err := writeTemp(r.root, "x.tmp", []byte("new")); err == nil {
+		return nil
+	})
+	if _, err := safefile.WriteTemp(r.root, "x", []byte("new"), bundleWrite); err == nil {
 		t.Error("the write followed the symlink")
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != "keep" {

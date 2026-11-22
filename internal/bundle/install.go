@@ -21,19 +21,6 @@ const (
 // it. The error holds no path and no byte.
 var ErrInstallFault = errors.New("bundle: install fault")
 
-// beforeRename is nil, except in a test. A test sets it to see or to fail a
-// rename of the install. It gets the names of the rename.
-var beforeRename func(from, to string) error
-
-func renameFile(root *os.Root, from, to string) error {
-	if beforeRename != nil {
-		if err := beforeRename(from, to); err != nil {
-			return err
-		}
-	}
-	return root.Rename(from, to)
-}
-
 // LoadFetched checks a fetched archive and its signature file. It installs
 // them in the bundle directory and makes the bundle the running bundle. The
 // source of the load is SourceFetch.
@@ -111,16 +98,17 @@ func (l *Loader) installPair(root *os.Root, name string, archive, sig []byte) er
 			return err
 		}
 	}
+	// WriteTemp makes "<name>.cbnd.tmp" and "<name>.sig.tmp" with bundleWrite.
 	for _, f := range []struct {
-		tmp  string
-		data []byte
-	}{{name + archiveTemp, archive}, {name + sigTemp, sig}} {
-		if err := writeTemp(root, f.tmp, f.data); err != nil {
+		final string
+		data  []byte
+	}{{name + ".cbnd", archive}, {name + ".sig", sig}} {
+		if _, err := safefile.WriteTemp(root, f.final, f.data, bundleWrite); err != nil {
 			l.removeTemps(root, name)
 			return err
 		}
 	}
-	if err := renameFile(root, name+archiveTemp, name+".cbnd"); err != nil {
+	if err := safefile.Rename(root, name+archiveTemp, name+".cbnd"); err != nil {
 		return err
 	}
 	return l.promoteSig(root, name)
@@ -131,12 +119,12 @@ func (l *Loader) installPair(root *os.Root, name string, archive, sig []byte) er
 // that works and a failed Sync clear the mark and give the Sync error. loadMu
 // is held.
 func (l *Loader) promoteSig(root *os.Root, name string) error {
-	if err := renameFile(root, name+sigTemp, name+".sig"); err != nil {
+	if err := safefile.Rename(root, name+sigTemp, name+".sig"); err != nil {
 		l.sigKept = true
 		return err
 	}
 	l.sigKept = false
-	return syncDir(root)
+	return safefile.SyncDir(root, ".", dirRule)
 }
 
 // removeTemps removes <name>.cbnd.tmp. It removes <name>.sig.tmp only when the
