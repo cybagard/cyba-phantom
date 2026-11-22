@@ -27,7 +27,7 @@ var ipRead = cursorRead("session", "rowid", "first_seen", "session_ip_first", "i
 // With no clock_jump range, the step runs the plain statement. With a range, it
 // reads session_ip_first after a cursor (see corrected). A session row in a
 // session range of a clock_jump row has first_seen with the correction of that
-// row (ADR-043). Then a call returns the entries that it read.
+// row (ADR-043). In that case, a call returns the entries that it read.
 //
 // The configuration keeps `days` in the range 1 to 7. Outside this range, or
 // with a zero tPriv, the step runs no statement and returns an error. The

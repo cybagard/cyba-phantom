@@ -20,11 +20,13 @@ const (
 	// clear statements repeat it in the same order. Then the index can serve.
 	rawIndexWhere = "body_prefix IS NOT NULL OR detail IS NOT NULL OR record IS NOT NULL"
 
-	// The clear statements set the three fields to NULL on at most a bound of
-	// rows. The subquery picks the rows in ts order from event_raw_ts, and no
-	// row above a rowid. Each picked row has a field. A cleared row leaves the
-	// index. clearPastSQL takes the rows with ts before a cutoff.
-	// clearFutureSQL takes the rows with ts after the future line.
+	// The plain clear statements set the three fields to NULL on at most a
+	// bound of rows. The subquery picks the rows in ts order from
+	// event_raw_ts, and no row above a rowid. Each picked row has a field. A
+	// cleared row leaves the index. clearPastSQL takes the rows with ts before
+	// a cutoff. clearFutureSQL takes the rows with ts after the future line.
+	// The corrected path reads the index in the cursor read clearRead, and
+	// clearIDsSQL clears the rows that it picks.
 	clearPastSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
 		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts < ? AND id <= ? AND (" + rawIndexWhere + ") " +
 		"ORDER BY ts LIMIT ?)"
@@ -94,7 +96,7 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // is tPriv minus `days` x 24 h, in unix ms. When part 1 has no row left, part 2
 // clears the rows with ts after the future line. A ts after the line shows a
 // wall clock that was ahead when the row was written. Part 2 has no
-// clock_jump correction, until a later change removes the future line.
+// clock_jump correction.
 //
 // The future line is the later of two values, plus 1 h. One value is the wall
 // time at the first call of the step, from the function `wall`. The other is
@@ -103,11 +105,12 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // Thus a row that a batch writes during the run keeps its fields until the
 // next run. The step ends.
 //
-// Each statement names INDEXED BY event_raw_ts. It repeats the WHERE text of
-// the index in the same order. A call changes at most `limit` rows. It takes
-// the rest of `limit` for part 2 when part 1 ends with fewer rows. It returns
-// the rows that it changed. A count below `limit` means that no row is left in
-// either part. The tally of the fields counts the rows of both parts.
+// Each plain statement names INDEXED BY event_raw_ts. It repeats the WHERE
+// text of the index in the same order. A call changes at most `limit` rows. It
+// takes the rest of `limit` for part 2 when part 1 ends with fewer rows. With
+// the plain statements, it returns the rows that it changed. A count below
+// `limit` means that no row is left in either part. The tally of the fields
+// counts the rows of both parts.
 //
 // Known limits. A run that takes a wall clock that is ahead takes a line that
 // is ahead too. Then the rows of that clock keep their fields. A start with
@@ -121,8 +124,8 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // With no clock_jump range, part 1 runs the plain statement. With a range, it
 // reads event_raw_ts after a cursor (see corrected). A row in an event range of
 // a clock_jump row has its ts with the correction of that row (ADR-043). Each
-// read keeps the bound `top`. In that case a call returns the entries that part
-// 1 read, and part 2 gets the rest of `limit`.
+// read keeps the bound `top`. In that case, a call returns the entries that
+// part 1 read, not the rows that it changed. Part 2 gets the rest of `limit`.
 //
 // With days outside 1 to 30, a zero tPriv, or no `wall`, the step runs no
 // statement. It returns an error.
@@ -167,20 +170,33 @@ func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retenti
 // deletes at most `limit` rows and returns their count. With days outside 1 to
 // 30, or a zero tDel, the step runs no statement and returns an error.
 //
-// With no clock_jump range, the step runs the plain statement. With a range, it
-// reads event_kind_ts after a cursor for each kind (see corrected). A row in an
-// event range of a clock_jump row has its ts with the correction of that row
-// (ADR-043). Then a call returns the entries that it read.
+// The step has no clock_jump correction. The DB cap uses it. The cap evicts by
+// the oldest UTC day in stored time. A correction would keep a row that a
+// range moves after that day, and the cap would evict no row.
 func newRawDeleteStep(tDel time.Time, days int) retentionStep {
+	cutoff, ok := rollupCutoff(tDel, days)
+	if !ok {
+		return rollupRefused
+	}
+	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+		return execCount(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
+	}
+}
+
+// newJumpRawDeleteStep is newRawDeleteStep with the clock_jump correction. The
+// retention run uses it. With no clock_jump range, it runs the plain statement.
+// With a range, it reads event_kind_ts after a cursor for each kind (see
+// corrected). A row in an event range of a clock_jump row has its ts with the
+// correction of that row (ADR-043). In that case, a call returns the entries
+// that it read.
+func newJumpRawDeleteStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
 	if !ok {
 		return rollupRefused
 	}
 	c := &corrected{
 		kind: eventRows, cutoff: cutoff, act: deleteEventIDsSQL, mem: memDeleted,
-		plain: func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-			return execCount(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
-		},
+		plain: newRawDeleteStep(tDel, days),
 	}
 	for _, kind := range rawKinds {
 		c.reads = append(c.reads, newIndexRead(rawRead, kind))

@@ -105,7 +105,7 @@ var corrCases = []corrCase{
 			return count(tb, db, fmt.Sprint("SELECT count(*) FROM session WHERE rowid = ", id, " AND ip IS NULL")) == 1
 		}},
 	{name: "raw delete", days: 30, corrected: true, seed: seedEvent("refused"), bulk: bulkEvent("refused"),
-		acted: rowGone("event", "id"), mk: func() retentionStep { return newRawDeleteStep(rollTDel, 30) }},
+		acted: rowGone("event", "id"), mk: func() retentionStep { return newJumpRawDeleteStep(rollTDel, 30) }},
 	{name: "event delete", days: 90, corrected: true, seed: seedEvent("request"), bulk: bulkEvent("request"),
 		acted: rowGone("event", "id"), mk: func() retentionStep { return newEventExpireStep(rollTDel, 90) },
 		setup: func(tb testing.TB, db *sql.DB) { mustExec(tb, db, metaSetSQL, rollupDoneKey, "9999-12-31") }},
@@ -471,7 +471,9 @@ func TestTU27CorrectedStepReadsEntriesOfOneTimeAcrossTheCursor(t *testing.T) {
 
 // T-U-27: while S is before the token epoch, each step runs except the mint
 // step. S is in 2025 and in the first week of 1970. Each step changes its row.
-// The mint row, which is old, stays.
+// The mint row, which is old, stays. A clock_jump row with a range of 1000
+// rowids holds the rows, so the corrected steps run. The callback row that
+// stays is in its event range, so the row stays too.
 func TestTU27EachStepRunsBeforeTheTokenEpoch(t *testing.T) {
 	for _, st := range []time.Time{time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC), time.UnixMilli(5 * rawDay)} {
 		t.Run(st.Format("2006-01-02"), func(t *testing.T) {
@@ -485,7 +487,7 @@ func TestTU27EachStepRunsBeforeTheTokenEpoch(t *testing.T) {
 			addFull(t, r.db, "callback", 1, ago(40), 0)
 			mustExec(t, r.db, "INSERT INTO ip_counter VALUES (?, 'h', 1, 0)", time.UnixMilli(ago(60)).UTC().Format(dayLayout))
 			mustExec(t, r.db, "INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) VALUES ('t', 's', 't', 1, ?)", ago(100))
-			mustExec(t, r.db, "INSERT INTO clock_jump VALUES (1, 50, 49, 50, 49, 5, 5)")
+			mustExec(t, r.db, "INSERT INTO clock_jump VALUES (1, 1, 1000, 1, 1000, 5, 5)")
 			addMintRow(t, r.db, 1, 5, 1, ago(100))
 			runOK(t, r)
 			for q, want := range map[string]int{
@@ -498,7 +500,7 @@ func TestTU27EachStepRunsBeforeTheTokenEpoch(t *testing.T) {
 				"SELECT count(*) FROM event WHERE " + rawCleared:               1,
 				"SELECT count(*) FROM ip_counter":                              0,
 				"SELECT count(*) FROM token":                                   0,
-				"SELECT count(*) FROM clock_jump":                              0,
+				"SELECT count(*) FROM clock_jump":                              1,
 				"SELECT count(*) FROM mint":                                    1,
 				"SELECT count(*) FROM meta WHERE key = 'retention_last'":       1,
 			} {
@@ -550,7 +552,7 @@ func TestTU27RawDeleteTakesBeaconAndRefusedRowsOfARange(t *testing.T) {
 	} {
 		seedEvent(r.kind)(t, db, r.id, r.ts)
 	}
-	call(t, db, newRawDeleteStep(rollTDel, 30), 1000)
+	call(t, db, newJumpRawDeleteStep(rollTDel, 30), 1000)
 	if left := eventIDs(t, db); left != "3 4 7 8" {
 		t.Fatalf("rows left %q; want 3 4 7 8", left)
 	}
@@ -624,4 +626,77 @@ func TestTU27ReadStatementsSearchTheirIndexes(t *testing.T) {
 			t.Errorf("plan of %q:\n%s\nwant %q, no SCAN of event or session, and no temporary B-tree", c.q, plan, c.use)
 		}
 	}
+}
+
+// T-U-11: the DB cap keeps the plain raw delete. The cap evicts by the oldest
+// UTC day in stored time. A refused row at the day 1 is in a +200 d range. The
+// corrected step would keep it, and the cap would stop. The cap evicts it, then
+// the session row of the day 3, and it leaves no row.
+func TestTU11CapEvictsARefusedRowOfAForwardJumpRange(t *testing.T) {
+	r := newRig(t, 100)
+	addEvents(t, r.db, "refused", 1, capDay(1), 0, nil, nil)
+	mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) VALUES ('1', 0, ?, 'h', 'human')", capDay(3))
+	addJumps(t, r.db, []testJump{{1, 1, 200 * rawDay}})
+	c := forcedCap(r, rollTDel)
+	reasons := recordUnmet(c)
+	var got []int
+	for range 3 {
+		got = append(got, callIn(t, r.db, c.evict, chunkRows))
+	}
+	if left := capLabels(t, r.db); fmt.Sprint(got) != "[1000 1000 0]" || len(left) != 0 {
+		t.Fatalf("calls returned %v and left %v; want [1000 1000 0] and no row", got, left)
+	}
+	if got := strings.Join(*reasons, ","); got != "stuck" {
+		t.Fatalf("counted %q, want one stuck at the end of the run", got)
+	}
+}
+
+// T-U-27: the raw delete has two kinds that each have more than limit/2 entries
+// that act. With the limit 10, the call reads 6 refused entries and then 4
+// beacon entries. The next call reads the last 2. No count is above the limit.
+func TestTU27RawDeleteKeepsTheLimitOverTwoKinds(t *testing.T) {
+	db := migrated(t)
+	addJumps(t, db, []testJump{{1, 12, hourMs}})
+	ts := rollCutoff(30) - 2*hourMs
+	bulkEvent("refused")(t, db, 1, 6, ts)
+	bulkEvent("beacon")(t, db, 7, 12, ts)
+	step := newJumpRawDeleteStep(rollTDel, 30)
+	var got []int
+	for range 3 {
+		got = append(got, call(t, db, step, 10))
+	}
+	if left := eventIDs(t, db); fmt.Sprint(got) != "[10 2 0]" || left != "" {
+		t.Fatalf("calls returned %v and left the rows %q; want [10 2 0] and none", got, left)
+	}
+}
+
+// T-U-27: a cursor read that fails makes the step return the error, also when
+// the next read succeeds. A bad eq statement is the failure. The first case
+// fails in the first read, and the second case in the second read.
+func TestTU27CursorReadErrorIsReturned(t *testing.T) {
+	bad := readSQL{eq: "SELECT no_such_column FROM event", gt: eventRead.gt}
+	for name, reads := range map[string][]*indexRead{
+		"first read":  {newIndexRead(bad), newIndexRead(eventRead)},
+		"second read": {newIndexRead(eventRead), newIndexRead(bad)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := migrated(t)
+			addJumps(t, db, []testJump{{1, 1, hourMs}})
+			seedEvent("refused")(t, db, 1, 0)
+			c := &corrected{kind: eventRows, cutoff: rollCutoff(30), act: deleteEventIDsSQL, mem: memDeleted, reads: reads}
+			tx, err := db.Begin()
+			check(t, err)
+			defer tx.Rollback()
+			if _, err := c.step()(context.Background(), tx, 10); err == nil {
+				t.Fatal("the step returned no error after a failed read")
+			}
+		})
+	}
+}
+
+// T-U-27: a clock_jump row with j = 0 gives the sum 0. Each row of its range
+// acts at S - days, as a row with no range does.
+func TestTU27JumpRowWithJOfZeroChangesNoRow(t *testing.T) {
+	jumps := []testJump{{3, 4, 0}}
+	checkCorrections(t, jumps, jumps, 8)
 }

@@ -98,8 +98,11 @@ type int128 struct {
 	lo uint64
 }
 
+// wide returns j as a number of 128 bits.
 func wide(j int64) int128 { return int128{j >> 63, uint64(j)} }
 
+// add returns the sum of a and b. It wraps at 2^128, which no sum of int64
+// values reaches.
 func (a int128) add(b int128) int128 {
 	sum := int128{a.hi + b.hi, a.lo + b.lo}
 	if sum.lo < a.lo { // the low words wrapped: carry 1 to the high word
@@ -108,6 +111,7 @@ func (a int128) add(b int128) int128 {
 	return sum
 }
 
+// neg returns the number with the other sign.
 func (a int128) neg() int128 {
 	return int128{^a.hi, ^a.lo}.add(int128{0, 1})
 }
@@ -177,13 +181,16 @@ func cursorRead(table, idCol, timeCol, index, lead, tail string) readSQL {
 }
 
 // An indexRead is the cursor read of one step on one index. cur is the last
-// entry that a call read. The step keeps it for the run.
+// entry that a call read. The step keeps it for the run. newIndexRead sets
+// lead. A caller that has tail values sets tail before the first read.
 type indexRead struct {
 	sql        readSQL
 	lead, tail []any
 	cur        entry
 }
 
+// newIndexRead returns a read of q with the lead values. Its cursor is before
+// each entry.
 func newIndexRead(q readSQL, lead ...any) *indexRead {
 	return &indexRead{sql: q, lead: lead, cur: entry{math.MinInt64, math.MinInt64}}
 }
@@ -284,9 +291,10 @@ func (c *corrected) step() retentionStep {
 	}
 }
 
-// run reads the entries of r. It acts on the entries with a corrected time
-// before the cutoff and a stored time before `stored`. It returns the count of
-// the entries that it read.
+// run reads the entries of r. The read ends before `stored`, so that each
+// entry has a stored time before it. The test of each entry repeats that term
+// as a second guard. run acts on the entries with a corrected time before the
+// cutoff. It returns the count of the entries that it read.
 func (c *corrected) run(ctx context.Context, tx *sql.Tx, r *indexRead, js *jumpSums, stored int64, limit int) (int, error) {
 	es, err := r.read(ctx, tx, min(shift(c.cutoff, js.low), stored), limit)
 	if err != nil {

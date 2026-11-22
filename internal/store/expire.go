@@ -86,11 +86,11 @@ func newGatedExpireStep(q string, cost int, tDel time.Time, days int,
 }
 
 // newEventExpireStep deletes the event rows of each kind with ts before the
-// cutoff (SEC-39). days is store.retention_days.events. The day step works on
-// one day next (see rollupWorkDay). A chunk keeps each row with a stored ts at
-// or after the start of that day. This holds for each sum of j. The day step
-// can stop early with a request row left. With no such day, the chunk has no
-// such end.
+// cutoff (SEC-39). days is store.retention_days.events. The day step has a day
+// in progress or a next day (see rollupWorkDay). A chunk keeps each row with a
+// stored ts at or after the start of that day. This holds for each sum of j.
+// The day step can stop early with a request row left. When it has no such
+// day, the chunk has no start to keep.
 //
 // With no clock_jump range, the step runs the plain statement with the cutoff
 // capped at that start. The behavior is the same as before the correction.
@@ -133,8 +133,8 @@ func newTokenExpireStep(tDel time.Time, days int) retentionStep {
 // newSessionExpireStep deletes the session rows with last_seen before the
 // cutoff (SEC-39). The event rows of a session stay: they go by their own ts.
 // days is store.retention_days.events. The step makes no clock_jump correction.
-// A session seen again after a jump has a right last_seen. The correction needs
-// the test of last_seen against the time of the jump, which is not built yet.
+// A session seen again after a jump has a correct last_seen. The correction
+// needs a test of last_seen against the time of the jump. No code makes it.
 func newSessionExpireStep(tDel time.Time, days int) retentionStep {
 	return newExpireStep(deleteSessionSQL, sessionExpireCost, tDel, days)
 }

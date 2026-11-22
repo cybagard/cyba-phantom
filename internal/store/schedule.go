@@ -349,8 +349,8 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // roll-up steps. A request row that the run finds at its start rolls up
 // before the event delete removes it. The configuration keeps the events days
 // not below the raw days (internal/config/validate.go). The event step has a
-// capped cutoff: see eventTime. The day step works on one day next. The event
-// step also keeps each row with a stored ts at or after the start of that day.
+// capped cutoff: see eventTime. The day step has a day in progress or a next
+// day. The event step keeps each row with a stored ts at or after that day.
 // These three deletes come before the field clear. The reason is the same as
 // for the raw delete.
 // The clear does not write rows that the event delete removes. The clear takes
@@ -377,7 +377,7 @@ func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, 
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
 		newIPStep(tPriv, ip),
-		newRawDeleteStep(tDel, raw),
+		newJumpRawDeleteStep(tDel, raw),
 		newCounterDeleteStep(tDel, raw),
 		newEventExpireStep(eventTime(tDel, raw, events), events),
 		newTokenExpireStep(tDel, events),
