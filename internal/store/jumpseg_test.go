@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 const hourMs = int64(time.Hour / time.Millisecond)
@@ -109,8 +111,10 @@ var corrCases = []corrCase{
 	{name: "event delete", days: 90, corrected: true, seed: seedEvent("request"), bulk: bulkEvent("request"),
 		acted: rowGone("event", "id"), mk: func() retentionStep { return newEventExpireStep(rollTDel, 90) },
 		setup: func(tb testing.TB, db *sql.DB) { mustExec(tb, db, metaSetSQL, rollupDoneKey, "9999-12-31") }},
-	{name: "session delete", days: 90, session: true, seed: seedSession, acted: rowGone("session", "rowid"),
-		mk: func() retentionStep { return newSessionExpireStep(rollTDel, 90) }},
+	// The session delete has no bulk. It costs 4 of the limit, so the read
+	// bound tests do not fit it. A test of its cost covers it.
+	{name: "session delete", days: 90, corrected: true, session: true, seed: seedSession,
+		acted: rowGone("session", "rowid"), mk: func() retentionStep { return newJumpSessionExpireStep(rollTDel, 90) }},
 	{name: "token delete", days: 90, acted: rowGone("token", "session_id"),
 		mk: func() retentionStep { return newTokenExpireStep(rollTDel, 90) },
 		seed: func(tb testing.TB, db *sql.DB, id, ts int64) {
@@ -215,7 +219,7 @@ func TestTU27SegmentsCutTheRangesWithoutOverlap(t *testing.T) {
 	h := hourMs
 	addJumps(t, db, []testJump{{1, 14, 10 * h}, {1, 8, 20 * h}, {1, 4, 40 * h}, {3, 12, -5 * h}, {50, 40, 99}, {100, math.MaxInt64, 1}})
 	// The jump 9 has an empty event range and the session range 20 to 30.
-	mustExec(t, db, "INSERT INTO clock_jump VALUES (9, 5, 4, 20, 30, 7, 5)")
+	mustExec(t, db, "INSERT INTO clock_jump VALUES (9, 5, 4, 20, 30, 7, ?)", int64(resetAt))
 	lo, hi := int64(math.MinInt64), int64(math.MaxInt64)
 	nested := []segment{{lo, 0, 0}, {1, 2, 70 * h}, {3, 4, 65 * h}, {5, 8, 25 * h}, {9, 12, 5 * h}, {13, 14, 10 * h}}
 	want := fmt.Sprint(append(nested, segment{15, 99, 0}, segment{100, hi, 1}))
@@ -346,7 +350,7 @@ func TestTU11JumpExpireDeletesRowsWithNoRowInTheirRanges(t *testing.T) {
 	} {
 		mustExec(t, db, "INSERT INTO clock_jump (event_from, event_to, session_from, session_to, j, at) VALUES (?, ?, ?, ?, 5, 5)", k[0], k[1], k[2], k[3])
 	}
-	step := newJumpExpireStep()
+	step := newJumpExpireStep(nil)
 	got := []int{call(t, db, step, 1), call(t, db, step, 1), call(t, db, step, 3), call(t, db, step, 3)}
 	if left := rawText(t, db, "SELECT group_concat(id, ' ') FROM (SELECT id FROM clock_jump ORDER BY id)"); fmt.Sprint(got) != "[1 1 2 0]" || left != "1 2 4 7 9 10" {
 		t.Fatalf("calls returned %v, rows left %q; want [1 1 2 0] and 1 2 4 7 9 10", got, left)
@@ -609,6 +613,7 @@ func TestTU27ReadStatementsSearchTheirIndexes(t *testing.T) {
 		{"event_kind_ts", rawRead, []any{"refused"}, nil},
 		{"event_raw_ts", clearRead, nil, []any{1}},
 		{"session_ip_first", ipRead, nil, nil},
+		{"session_band_last", sessionRead, []any{"human"}, nil},
 	} {
 		eq := slices.Concat(c.lead, []any{1, 1}, c.tail, []any{1000})
 		gt := slices.Concat(c.lead, []any{1, 2}, c.tail, []any{1000})
@@ -618,13 +623,289 @@ func TestTU27ReadStatementsSearchTheirIndexes(t *testing.T) {
 		all = append(all, stmt{q, "SEARCH event USING INTEGER PRIMARY KEY", []any{"[1]"}})
 	}
 	all = append(all, stmt{clearIPIDsSQL, "SEARCH session USING INTEGER PRIMARY KEY", []any{"[1]"}},
-		stmt{deleteJumpSQL, "INTEGER PRIMARY KEY (rowid>? AND rowid<?)", []any{1000}})
+		stmt{deleteSessionIDsSQL, "SEARCH session USING INTEGER PRIMARY KEY", []any{"[1]"}},
+		stmt{deleteJumpSQL, "INTEGER PRIMARY KEY (rowid>? AND rowid<?)", []any{math.MaxInt64, 1000}},
+		stmt{moveEventEndSQL, "SEARCH event USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)", []any{1, 1, 0, 1, math.MaxInt64}},
+		stmt{moveSessionEndSQL, "SEARCH session USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)", []any{1, 1, 0, 1, math.MaxInt64}})
 	for _, c := range all {
 		plan := strings.Join(queryPlan(t, db, c.q, c.args...), "\n")
 		if !strings.Contains(plan, c.use) || strings.Contains(plan, "SCAN event") || strings.Contains(plan, "SCAN session") ||
 			strings.Contains(plan, "TEMP B-TREE") {
 			t.Errorf("plan of %q:\n%s\nwant %q, no SCAN of event or session, and no temporary B-tree", c.q, plan, c.use)
 		}
+	}
+}
+
+// addGrace adds a clock_jump row with an `at` test. Its event range and its
+// session range are the same.
+func addGrace(tb testing.TB, db *sql.DB, id, from, to, j, at int64) {
+	tb.Helper()
+	mustExec(tb, db, "INSERT INTO clock_jump VALUES (?, ?, ?, ?, ?, ?, ?)", id, from, to, from, to, j, at)
+}
+
+// evAt makes an event of kind k with the time ts and no session.
+func evAt(t *testing.T, k event.Kind, ts int64) *event.Event {
+	return sessEvent(t, k, "", "", "", ts)
+}
+
+// graceNow moves the wall clock ahead of the boot clock by skew at the boot
+// clock `boot`. Then it runs one clock tick. The writer does not run. The test
+// calls it in its own goroutine. It returns the `at` of the new grace jump.
+func graceNow(t *testing.T, r *rig, f *fakeSrc, boot, skew time.Duration) int64 {
+	t.Helper()
+	f.at(boot)
+	f.skew.Store(skew.Milliseconds())
+	r.w.serveClock()
+	if err := r.w.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return r.key().Jump.At
+}
+
+// ends returns the event_to and the session_to of each clock_jump row.
+func ends(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	return rawText(t, db, "SELECT coalesce(group_concat(event_to || '/' || session_to, ' '), '') FROM (SELECT * FROM clock_jump ORDER BY id)")
+}
+
+// eventDeleteAt runs the event delete with the cutoff `cutoff` in stored time.
+// The day step has no work, so the delete has no gate.
+func eventDeleteAt(t *testing.T, r *rig, cutoff int64) {
+	t.Helper()
+	mustExec(t, r.db, metaSetSQL, rollupDoneKey, "9999-12-31")
+	call(t, r.db, newEventExpireStep(time.UnixMilli(cutoff).Add(90*24*time.Hour), 90), 1000)
+}
+
+// T-U-27, T-U-30: a row with a time before `at`, in a batch after the jump,
+// moves the end. It takes J. The evidence lane goes first. So the
+// evidence row has a time at or after `at` and the lower rowid. The bulk row
+// with the time before `at` has the higher rowid. The row with the later time
+// takes no J. A batch with no row before `at` runs no move. A batch of two rows
+// before `at` moves the end to the larger rowid.
+func TestTU27RowInFlightMovesTheEndAndTakesJ(t *testing.T) {
+	r, f := clockRig(t)
+	moves := 0
+	r.w.beforeMove = func() { moves++ }
+	at := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	if got := ends(t, r.db); got != "0/0" {
+		t.Fatalf("ends %q after the jump, want 0/0", got)
+	}
+	// The rowids are 1 and 2, then 3 with no move, then 4 and 5.
+	r.writeOK(evAt(t, event.KindCallback, at+10), evAt(t, event.KindRequest, at-1))
+	r.writeOK(evAt(t, event.KindRequest, at+5))
+	r.writeOK(evAt(t, event.KindRequest, at-5), evAt(t, event.KindRequest, at-4))
+	if got := ends(t, r.db); got != "5/0" || moves != 2 {
+		t.Fatalf("ends %q after %d moves, want 5/0 after 2", got, moves)
+	}
+	// The cutoff is 1 h after `at`. A row with J = 3 h stays. A row with no J
+	// acts.
+	eventDeleteAt(t, r, at+hourMs)
+	if left := eventIDs(t, r.db); left != "2 4 5" {
+		t.Fatalf("rows left %q, want 2 4 5: the rows 1 and 3 have a time at or after `at`", left)
+	}
+}
+
+// T-U-27, T-U-30: a new session row with a time before `at` moves the session
+// end and takes J. A known session that keeps its old row moves no end. A new
+// session with a time at or after `at` takes no J.
+func TestTU27SessionRowInFlightMovesTheSessionEnd(t *testing.T) {
+	r, f := clockRig(t)
+	// The session row 1 is from before the jump.
+	r.writeOK(sessEvent(t, event.KindRequest, "known", "", "", wall0+1000))
+	at := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	if got := ends(t, r.db); got != "1/1" {
+		t.Fatalf("ends %q after the jump, want 1/1", got)
+	}
+	// The known session keeps its row. The writer skips the rowid 2 for it.
+	r.writeOK(sessEvent(t, event.KindRequest, "known", "", "", at-1))
+	if got := ends(t, r.db); got != "2/1" {
+		t.Fatalf("ends %q after a known session, want 2/1: the event row moves, the session end stays", got)
+	}
+	// The session a has the rowids 3 and 3. The session b has the rowids 4 and
+	// 4, and it moves no end.
+	r.writeOK(sessEvent(t, event.KindRequest, "a", "", "", at-2))
+	r.writeOK(sessEvent(t, event.KindRequest, "b", "", "", at+5))
+	if got := ends(t, r.db); got != "3/3" {
+		t.Fatalf("ends %q after a new session, want 3/3", got)
+	}
+	call(t, r.db, newJumpSessionExpireStep(time.UnixMilli(at+hourMs).Add(90*24*time.Hour), 90), 1000)
+	if left := rawText(t, r.db, "SELECT group_concat(id, ' ') FROM (SELECT id FROM session ORDER BY rowid)"); left != "known a" {
+		t.Fatalf("sessions left %q, want known and a: b has a time at or after `at`", left)
+	}
+}
+
+// T-U-27, T-U-30: two grace jumps give two rows, with no read of S between
+// them. A row with a time between the two `at` values moves only the end of the
+// second row. It takes only the second J. A row before both takes both.
+func TestTU30TwoGraceJumpsGiveTwoRowsAndEachRowTakesItsOwnJ(t *testing.T) {
+	r, f := clockRig(t)
+	at1 := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	at2 := graceNow(t, r, f, 4*time.Minute, 5*time.Hour)
+	if got, sizes := ends(t, r.db), rawText(t, r.db, "SELECT group_concat(j, ' ') FROM (SELECT j FROM clock_jump ORDER BY id)"); got != "0/0 0/0" ||
+		sizes != fmt.Sprint(3*hourMs, " ", 2*hourMs) || at2 <= at1 {
+		t.Fatalf("ends %q, sizes %q; want two rows 0/0 0/0 with the sizes 3 h and 2 h", got, sizes)
+	}
+	// The rowid 1 has a time between the two `at` values.
+	r.writeOK(evAt(t, event.KindRequest, at1+1))
+	if got := ends(t, r.db); got != "0/0 1/0" {
+		t.Fatalf("ends %q, want 0/0 1/0", got)
+	}
+	// The rowid 2 has a time before both.
+	r.writeOK(evAt(t, event.KindRequest, at1-1))
+	if got := ends(t, r.db); got != "2/0 2/0" {
+		t.Fatalf("ends %q, want 2/0 2/0", got)
+	}
+	// Row 1 acts with the J of 2 h, and row 2 with 5 h.
+	eventDeleteAt(t, r, at1+1+2*hourMs+1)
+	if left := eventIDs(t, r.db); left != "2" {
+		t.Fatalf("rows left %q, want 2: the row 1 takes only the second J", left)
+	}
+}
+
+// T-U-27, T-U-30: a grace row with empty ranges stays through the clock_jump
+// delete of the running process. A row of an earlier process with empty ranges
+// goes. A row in flight, written after the delete, moves the end and takes J.
+func TestTU30GraceRowWithEmptyRangesStaysThroughTheJumpDelete(t *testing.T) {
+	r, f := newRig(t, 8), &fakeSrc{}
+	mustExec(t, r.db, "INSERT INTO clock_jump VALUES (1, 5, 4, 5, 4, 1, 5)")
+	if err := r.w.StartClock(f.source()); err != nil {
+		t.Fatal(err)
+	}
+	at := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	if n := call(t, r.db, newJumpExpireStep(&r.w.knownJump), 10); n != 1 {
+		t.Fatalf("the delete removed %d rows, want 1", n)
+	}
+	if got := rawText(t, r.db, "SELECT group_concat(id, ' ') FROM clock_jump"); got != "2" {
+		t.Fatalf("clock_jump ids %q, want 2", got)
+	}
+	r.writeOK(evAt(t, event.KindRequest, at-1))
+	if got := ends(t, r.db); got != "1/0" {
+		t.Fatalf("ends %q, want 1/0", got)
+	}
+	eventDeleteAt(t, r, at+hourMs)
+	if left := eventIDs(t, r.db); left != "1" {
+		t.Fatalf("rows left %q, want 1: the row takes J", left)
+	}
+	// With no event row left, the row holds no row. The running process keeps
+	// it. A writer with no clock has no row of its own: the delete removes it.
+	mustExec(t, r.db, "DELETE FROM event")
+	if n := call(t, r.db, newJumpExpireStep(&r.w.knownJump), 10); n != 0 {
+		t.Fatalf("the delete removed %d rows of the running process, want 0", n)
+	}
+	if n := call(t, r.db, newJumpExpireStep(nil), 10); n != 1 {
+		t.Fatalf("the delete with no known id removed %d rows, want 1", n)
+	}
+}
+
+// T-U-27: a reset row has no test of the row time. Each row of its ranges takes
+// its j. This includes a row with a time after the stored S of the reset. The
+// J is -72 h, and the rows have a time 72 h after the cutoff. The row 1 acts.
+// The row 2 has the time at the end and stays. A grace row has the same j and
+// the `at` of the cutoff. It gives no j to the rows 3 and 4, which have the
+// same times.
+func TestTU27ResetRowGivesItsJToRowsAfterItsStoredTime(t *testing.T) {
+	db := migrated(t)
+	cutoff, j := rollCutoff(30), 72*hourMs
+	addGrace(t, db, 100, 1, 2, -j, math.MaxInt64)
+	addGrace(t, db, 101, 3, 4, -j, cutoff)
+	for id, ts := range map[int64]int64{1: cutoff + j - 1, 2: cutoff + j, 3: cutoff + j - 1, 4: cutoff + j} {
+		seedEvent("refused")(t, db, id, ts)
+	}
+	call(t, db, newJumpRawDeleteStep(rollTDel, 30), 1000)
+	if left := eventIDs(t, db); left != "2 3 4" {
+		t.Fatalf("rows left %q, want 2 3 4", left)
+	}
+}
+
+// T-U-27: a row takes the j of a grace row only when its time is before `at`.
+// The `at` is 1 h before the cutoff, and J is +72 h. The row 3 has the time
+// 1 ms before `at`: it takes J and stays. The rows 4 and 5 have the time `at`
+// and 1 ms after: they take no J, and they act.
+func TestTU27GraceRowGivesItsJOnlyToRowsBeforeAt(t *testing.T) {
+	db := migrated(t)
+	cutoff := rollCutoff(30)
+	at := cutoff - hourMs
+	addGrace(t, db, 100, 3, 6, 72*hourMs, at)
+	for id, ts := range map[int64]int64{3: at - 1, 4: at, 5: at + 1, 6: at - 1} {
+		seedEvent("refused")(t, db, id, ts)
+	}
+	call(t, db, newJumpRawDeleteStep(rollTDel, 30), 1000)
+	if left := eventIDs(t, db); left != "3 6" {
+		t.Fatalf("rows left %q, want 3 6", left)
+	}
+}
+
+// T-U-27: the read ends at the cutoff minus the smallest sum that a row can
+// get. A reset row gives -72 h to the rows 7 to 9. A grace row with the `at` of
+// the cutoff gives +72 h. A row with a time at or after `at` gets -72 h only.
+// Thus the read must go 72 h past the cutoff. The row 7 has the time 1 ms
+// before the end and acts. The row 8 has the time at the end and stays. The row
+// 9 has the time before `at`, gets the sum 0, and acts.
+func TestTU27ReadEndUsesTheSmallestSumWithTheAtTest(t *testing.T) {
+	db := migrated(t)
+	cutoff, j := rollCutoff(30), 72*hourMs
+	addGrace(t, db, 100, 7, 9, -j, math.MaxInt64)
+	addGrace(t, db, 101, 7, 9, j, cutoff)
+	for id, ts := range map[int64]int64{7: cutoff + j - 1, 8: cutoff + j, 9: cutoff - 1} {
+		seedEvent("refused")(t, db, id, ts)
+	}
+	call(t, db, newJumpRawDeleteStep(rollTDel, 30), 1000)
+	if left := eventIDs(t, db); left != "8" {
+		t.Fatalf("rows left %q, want 8", left)
+	}
+}
+
+// T-U-27: the session delete takes last_seen with the `at` test. The `at` is 2
+// h before the cutoff, and J is +72 h. A session seen again after the jump has
+// last_seen at or after `at`. It goes at its last_seen + days: 1 ms before the
+// cutoff, not at it. A session with last_seen before `at` goes J later: 1 ms
+// before cutoff - J, not at it. Each of the four bands has the four cases.
+func TestTU27SessionDeleteTakesLastSeenWithTheAtTest(t *testing.T) {
+	db := migrated(t)
+	cutoff, j := rollCutoff(90), 72*hourMs
+	addGrace(t, db, 100, 1, 16, j, cutoff-2*hourMs)
+	// The rows go, stay, go, and stay.
+	times := []int64{cutoff - 1, cutoff, cutoff - j - 1, cutoff - j}
+	for b, band := range sessionBands {
+		for k, ts := range times {
+			mustExec(t, db, "INSERT INTO session (rowid, id, first_seen, last_seen, ip, ip_hmac, band) VALUES (?, ?, ?, ?, '192.0.2.1', 'h', ?)",
+				4*b+k+1, fmt.Sprint(band, k), ts, ts, band)
+		}
+	}
+	step := newJumpSessionExpireStep(rollTDel, 90)
+	if n := call(t, db, step, 1000); n != 48 {
+		t.Fatalf("the call returned %d, want 48: 12 entries read, cost 4", n)
+	}
+	if left := rawText(t, db, "SELECT group_concat(rowid, ' ') FROM (SELECT rowid FROM session ORDER BY rowid)"); left != "2 4 6 8 10 12 14 16" {
+		t.Fatalf("session rowids left %q, want 2 4 6 8 10 12 14 16", left)
+	}
+	if n := call(t, db, step, 1000); n != 0 {
+		t.Fatalf("a second call returned %d, want 0", n)
+	}
+}
+
+// T-U-27: a session row costs 4 of the limit. A call reads at most limit / 4
+// entries, so it deletes at most that many rows. It returns the limit when it
+// read the most, also with no clock_jump range. A limit below 4 runs no
+// statement.
+func TestTU27SessionDeleteCostsFourOfTheLimit(t *testing.T) {
+	for _, ranged := range []bool{false, true} {
+		t.Run(fmt.Sprint("range ", ranged), func(t *testing.T) {
+			db := migrated(t)
+			if ranged {
+				addGrace(t, db, 100, 5000, 5001, hourMs, math.MaxInt64-1)
+			}
+			bulkSession(t, db, 1, 10, rollCutoff(90)-1000)
+			step := newJumpSessionExpireStep(rollTDel, 90)
+			var got, left []int
+			for _, limit := range []int{3, 8, 8, 8, 8, 8, 8} {
+				got = append(got, call(t, db, step, limit))
+				left = append(left, count(t, db, "SELECT count(*) FROM session"))
+			}
+			if fmt.Sprint(got) != "[3 8 8 8 8 8 0]" || fmt.Sprint(left) != "[10 8 6 4 2 0 0]" {
+				t.Fatalf("calls returned %v and left %v rows; want [3 8 8 8 8 8 0] and [10 8 6 4 2 0 0]", got, left)
+			}
+		})
 	}
 }
 

@@ -22,55 +22,82 @@ var (
 // same sum of j.
 type segment struct{ lo, hi, sum int64 }
 
+// resetAt is the `at` of a reset row. A row of this value has no test of the
+// row time: each row of its ranges takes its j. Any other `at` is the S of a
+// grace jump. A row of its ranges takes the j only when its time is before it.
+const resetAt = math.MaxInt64
+
+// A graceRow is a clock_jump row with an `at` test.
+type graceRow struct{ from, to, j, at int64 }
+
 // jumpSums gives the sum of j of the clock_jump rows for each rowid of one
 // table.
 type jumpSums struct {
-	segs []segment // in rowid order, with no overlap; they cover all rowids
-	low  int64     // the smallest sum of any rowid, at most 0
+	// segs holds the sums of the reset rows. They are in rowid order, with no
+	// overlap, and they cover all rowids.
+	segs []segment
+	// grace holds the rows with an `at` test. An entry takes the j of one when
+	// its rowid is in the range and its time is before `at`.
+	grace []graceRow
+	// low is the smallest sum that any row can get, at most 0. It takes each
+	// negative j of a grace row as if its test were true.
+	low int64
 }
 
 // sums reads the ranges of the clock_jump rows of kind k. It returns nil when
 // no range is used. A range with its start after its end is not used. The
 // ranges of one host boot overlap. Thus a rowid has the sum of j of each range
-// that holds it. A rowid in no range has the sum 0. Two segments next to each
-// other with the same sum are one segment. A sum stays in the range of int64:
-// it is the true sum, or the nearest end of that range.
+// that holds it. A grace row gives its j only when the time of the row is
+// before its `at` (see sum). A rowid in no range has the sum 0. Two segments
+// next to each other with the same sum are one segment. A sum stays in the
+// range of int64: it is the true sum, or the nearest end of that range.
 //
 // A step calls sums one time for each step call, not one time for each run.
 // The writer can move the end of a range between two chunks. A call then sees
-// the ranges that its own transaction sees.
+// the ranges that its own transaction sees. The memory is a bound times the
+// count of the clock_jump rows.
 func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT "+k.from+", "+k.to+", j FROM clock_jump WHERE "+k.from+" <= "+k.to)
+	rows, err := tx.QueryContext(ctx, "SELECT "+k.from+", "+k.to+", j, at FROM clock_jump WHERE "+k.from+" <= "+k.to)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	// A change of the sum at a rowid. A wide number holds the sum of any count
-	// of changes. The result is clamped when a segment is made.
+	// A change of the sums at a rowid. A wide number holds the sum of any count
+	// of changes. The result is clamped when a segment is made. fixed is for
+	// the segments. low is for the smallest sum.
 	type change struct {
-		at int64
-		d  int128
+		at         int64
+		fixed, low int128
 	}
 	var changes []change
+	js := &jumpSums{}
+	found := false
 	for rows.Next() {
-		var from, to, j int64
-		if err := rows.Scan(&from, &to, &j); err != nil {
+		var g graceRow
+		if err := rows.Scan(&g.from, &g.to, &g.j, &g.at); err != nil {
 			return nil, err
 		}
-		changes = append(changes, change{from, wide(j)})
-		if to < math.MaxInt64 {
-			changes = append(changes, change{to + 1, wide(j).neg()})
+		found = true
+		var fixed, low int128
+		if g.at == resetAt {
+			fixed, low = wide(g.j), wide(g.j)
+		} else {
+			js.grace = append(js.grace, g)
+			low = wide(min(g.j, 0))
+		}
+		changes = append(changes, change{g.from, fixed, low})
+		if g.to < math.MaxInt64 {
+			changes = append(changes, change{g.to + 1, fixed.neg(), low.neg()})
 		}
 	}
-	if err := rows.Err(); err != nil || len(changes) == 0 {
+	if err := rows.Err(); err != nil || !found {
 		return nil, err
 	}
 	slices.SortFunc(changes, func(a, b change) int { return cmp.Compare(a.at, b.at) })
-	js := &jumpSums{}
-	lo, sum := int64(math.MinInt64), int128{}
+	lo, fixed, low := int64(math.MinInt64), int128{}, int128{}
 	cut := func(hi int64) {
-		s := sum.clamp()
-		js.low = min(js.low, s)
+		s := fixed.clamp()
+		js.low = min(js.low, low.clamp())
 		if n := len(js.segs); n > 0 && js.segs[n-1].sum == s {
 			js.segs[n-1].hi = hi
 		} else {
@@ -83,7 +110,7 @@ func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 			cut(e - 1)
 		}
 		for ; i < len(changes) && changes[i].at == e; i++ {
-			sum = sum.add(changes[i].d)
+			fixed, low = fixed.add(changes[i].fixed), low.add(changes[i].low)
 		}
 		lo = e
 	}
@@ -127,7 +154,25 @@ func (a int128) clamp() int64 {
 	return math.MaxInt64
 }
 
-// at returns the sum of j of the rowid id.
+// sum returns the sum of j of the entry with the rowid id and the row time t.
+// The entry takes the j of a reset row that holds id. It takes the j of a grace
+// row that holds id only if t is before its `at`. This is one compare for each
+// grace row. The step reads no index range for each `at`.
+func (s *jumpSums) sum(id, t int64) int64 {
+	base := s.at(id)
+	if len(s.grace) == 0 {
+		return base
+	}
+	total := wide(base)
+	for _, g := range s.grace {
+		if g.from <= id && id <= g.to && t < g.at {
+			total = total.add(wide(g.j))
+		}
+	}
+	return total.clamp()
+}
+
+// at returns the sum of j of the reset rows that hold the rowid id.
 func (s *jumpSums) at(id int64) int64 {
 	i, _ := slices.BinarySearchFunc(s.segs, id, func(g segment, id int64) int {
 		switch {
@@ -242,10 +287,12 @@ func (r *indexRead) query(ctx context.Context, tx *sql.Tx, q string, b int64, li
 // one place of the correction code.
 //
 // A call reads at most `limit` index entries, with no other filter than the
-// index terms. It adds to each entry the sum of j of its rowid. It acts, by
-// rowid, on the entries with a corrected time before the cutoff. The read ends
-// at the time "cutoff minus low", where low is the smallest sum, at most 0.
-// Thus no entry that can act lies after the end.
+// index terms. It adds to each entry the sum of j of its rowid. A grace row
+// gives its j only when the time of the entry is before its `at` (see
+// jumpSums.sum). It acts, by rowid, on the entries with a corrected time before
+// the cutoff. The read ends at the time "cutoff minus low". Here low is the
+// smallest sum that any entry can get, at most 0. Thus no entry that can act
+// lies after the end.
 //
 // With no clock_jump range, a call runs `plain`. It is the statement that the
 // step had before the correction. The behavior of the step does not change.
@@ -302,7 +349,7 @@ func (c *corrected) run(ctx context.Context, tx *sql.Tx, r *indexRead, js *jumpS
 	}
 	ids := []byte{'['}
 	for _, e := range es {
-		if e.ts < min(shift(c.cutoff, js.at(e.id)), stored) {
+		if e.ts < min(shift(c.cutoff, js.sum(e.id, e.ts)), stored) {
 			if len(ids) > 1 {
 				ids = append(ids, ',')
 			}

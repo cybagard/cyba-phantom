@@ -93,6 +93,7 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 		return err
 	}
 	w.clk, w.src = clk, src
+	w.knownJump = in.KnownJumpID
 	if err := w.writeKey(res.State, res.Jump); err != nil {
 		w.clk = nil
 		return err
@@ -180,7 +181,58 @@ func (w *Writer) writeKey(st sensortime.State, jump *sensortime.JumpResult) (err
 	// row must not get a rowid in the range of the jump.
 	w.nextEvent, w.nextSession = st.NextEvent, st.NextSession
 	w.lastKey = st.BootClock
+	if jump != nil && jump.Kind == sensortime.KindGrace {
+		w.graceAt = max(w.graceAt, st.Jump.At)
+	}
 	w.clk.Committed()
+	return nil
+}
+
+// moveEndSQL makes the statement that moves the end of the ranges of the grace
+// rows of this process. The first two values are the first and the last rowid
+// of the batch. The next three values are these. One is the largest id of an
+// earlier process. One is the smallest time of the batch. One is the reset
+// `at`. For each grace row, the subquery finds the largest rowid of the batch
+// with a time before `at`. The `+` before the time column keeps the planner off
+// the time index. The update moves an end only up. The statement uses the
+// primary key of clock_jump and a rowid range of the table.
+func moveEndSQL(table, idCol, timeCol string, k rowKind) string {
+	return "UPDATE clock_jump SET " + k.to + " = m.hi FROM (SELECT c.id AS cid, " +
+		"(SELECT max(" + idCol + ") FROM " + table + " WHERE " + idCol + " BETWEEN ? AND ? AND +" + timeCol + " < c.at) AS hi " +
+		"FROM clock_jump AS c WHERE c.id > ? AND c.at > ? AND c.at < ?) AS m " +
+		"WHERE clock_jump.id = m.cid AND m.hi > clock_jump." + k.to
+}
+
+var (
+	moveEventEndSQL   = moveEndSQL("event", "id", "ts", eventRows)
+	moveSessionEndSQL = moveEndSQL("session", "rowid", "first_seen", sessionRows)
+)
+
+// moveEnds moves the end of the ranges of each grace row of this process. It
+// runs in the transaction of a batch (ADR-043). The batch has the event rowids
+// firstEv to lastEv. It has the new session rowids firstSes to lastSes. A grace
+// row takes the largest rowid of these with a time before its `at`. For a
+// session, the time is first_seen. A session that the batch only updates keeps
+// its old rowid. That rowid is not in the range, so it does not count. A grace
+// row with no such rowid keeps its end. minTS is the smallest time of the
+// batch. It leaves out the grace rows that no row of the batch can match. The
+// caller runs moveEnds only when minTS is before the largest `at` of this
+// process. It uses no memory for each row.
+func (w *Writer) moveEnds(ctx context.Context, tx *sql.Tx, firstEv, lastEv, firstSes, lastSes, minTS int64) error {
+	if w.beforeMove != nil {
+		w.beforeMove()
+	}
+	for _, m := range []struct {
+		q           string
+		first, last int64
+	}{{moveEventEndSQL, firstEv, lastEv}, {moveSessionEndSQL, firstSes, lastSes}} {
+		if m.first > m.last {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, m.q, m.first, m.last, w.knownJump, minTS, int64(resetAt)); err != nil {
+			return fail(writerName, ruleDatabase)
+		}
+	}
 	return nil
 }
 

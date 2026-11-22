@@ -159,6 +159,14 @@ type Writer struct {
 	// lastCheck and lastKey are the boot clock of the last clock check and of
 	// the last key write.
 	lastCheck, lastKey time.Duration
+	// knownJump is the largest clock_jump id at StartClock. A row with a larger
+	// id is a row of this process. graceAt is the largest `at` of the grace
+	// rows that this process wrote, or 0 with none. A batch with no row before
+	// it moves no range end (see moveEnds).
+	knownJump, graceAt int64
+	// beforeMove runs at the start of each moveEnds call. A test sets it; nil
+	// in production.
+	beforeMove func()
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
@@ -625,6 +633,9 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			return false, err
 		}
 	}
+	// firstEv and firstSes are the first rowids of this batch. minTS is the
+	// smallest time of its rows.
+	firstEv, firstSes, minTS := nextEv, nextSes, int64(math.MaxInt64)
 	var first int64
 	var appendErr error
 	if len(hs) > 0 {
@@ -679,11 +690,19 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 		tokens.note(e, rec)
 		rows++
+		minTS = min(minTS, rec.TS)
 		w.sessions.add(rec, e.IP())
 		w.beacons.add(rec)
 	}
 	if err := w.upsertSessions(ctx, tx, key, &nextSes); err != nil {
 		return false, err
+	}
+	// A row in flight can have a time before the `at` of a grace row of this
+	// process. The move of the ranges is in this transaction.
+	if w.clk != nil && minTS < w.graceAt {
+		if err := w.moveEnds(ctx, tx, firstEv, nextEv-1, firstSes, nextSes-1, minTS); err != nil {
+			return false, err
+		}
 	}
 	// The beacon updates come after the session upserts, so a session of the
 	// same batch has its row.

@@ -27,7 +27,9 @@ const (
 	// deleteJumpSQL deletes each clock_jump row that holds no row. Its event
 	// range has no event row, and its session range has no session row. A range
 	// with its start after its end holds no row. Each probe is a rowid search.
-	deleteJumpSQL = "DELETE FROM clock_jump WHERE id IN (SELECT id FROM clock_jump AS c WHERE " +
+	// The first value is the largest id that the statement can delete. A row of
+	// the running process has a larger id.
+	deleteJumpSQL = "DELETE FROM clock_jump WHERE id IN (SELECT id FROM clock_jump AS c WHERE c.id <= ? AND " +
 		"NOT EXISTS (SELECT 1 FROM event WHERE id BETWEEN c.event_from AND c.event_to) AND " +
 		"NOT EXISTS (SELECT 1 FROM session WHERE rowid BETWEEN c.session_from AND c.session_to) LIMIT ?)"
 )
@@ -133,19 +135,82 @@ func newTokenExpireStep(tDel time.Time, days int) retentionStep {
 // newSessionExpireStep deletes the session rows with last_seen before the
 // cutoff (SEC-39). The event rows of a session stay: they go by their own ts.
 // days is store.retention_days.events. The step makes no clock_jump correction.
-// A session seen again after a jump has a correct last_seen. The correction
-// needs a test of last_seen against the time of the jump. No code makes it.
+// The DB cap uses it. The cap evicts by the stored day, and a correction would
+// keep rows that the cap evicts. The retention run uses
+// newJumpSessionExpireStep.
 func newSessionExpireStep(tDel time.Time, days int) retentionStep {
 	return newExpireStep(deleteSessionSQL, sessionExpireCost, tDel, days)
+}
+
+// sessionBands are the four bands of a session row. The session delete reads
+// session_band_last for each of them.
+var sessionBands = []string{"human", "crawler", "agent-likely", "agent-confirmed"}
+
+// sessionRead is the cursor read of the session delete. It uses
+// session_band_last, with the band as the lead value.
+var sessionRead = cursorRead("session", "rowid", "last_seen", "session_band_last", "band = ? AND ", "")
+
+// deleteSessionIDsSQL deletes the session rows of a JSON array of rowids.
+const deleteSessionIDsSQL = "DELETE FROM session WHERE rowid IN (SELECT value FROM json_each(?))"
+
+// newJumpSessionExpireStep is newSessionExpireStep with the clock_jump
+// correction (ADR-043). The retention run uses it. With no clock_jump range, it
+// runs the plain statement. With a range, it reads session_band_last after a
+// cursor for each band (see corrected). The time of an entry is last_seen. A
+// grace row gives its j only when last_seen is before its `at`. A session seen
+// again after the jump has a right last_seen, so it takes no j.
+//
+// A row costs sessionExpireCost of the limit, as in the plain step. A call
+// reads at most limit / cost entries, so it deletes at most that many rows. It
+// returns `limit` when it read the most entries, and cost x entries otherwise.
+// With a limit below the cost, it runs no statement and returns `limit`.
+func newJumpSessionExpireStep(tDel time.Time, days int) retentionStep {
+	cutoff, ok := retentionCutoff(tDel, days, expireMaxDays)
+	if !ok {
+		return rollupRefused
+	}
+	c := &corrected{
+		kind: sessionRows, cutoff: cutoff, act: deleteSessionIDsSQL, mem: memDeleted,
+		plain: newExpireStep(deleteSessionSQL, 1, tDel, days),
+	}
+	for _, band := range sessionBands {
+		c.reads = append(c.reads, newIndexRead(sessionRead, band))
+	}
+	inner := c.step()
+	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+		most := limit / sessionExpireCost
+		if most == 0 {
+			return limit, nil
+		}
+		n, err := inner(ctx, tx, most)
+		if err != nil {
+			return 0, err
+		}
+		if n >= most {
+			return limit, nil
+		}
+		return sessionExpireCost * n, nil
+	}
 }
 
 // newJumpExpireStep returns the step that deletes the clock_jump rows with no
 // row in their two ranges (ADR-043). The schedule puts it after the event and
 // session deletes. Each call deletes at most `limit` rows and returns their
 // count. A count below `limit` means that no such row is left.
-func newJumpExpireStep() retentionStep {
+//
+// The step does not delete a row of the running process: a row with an id
+// above *known. StartClock sets *known to the largest id at its start, before
+// Run starts. The steps run in the writer goroutine, after that write, and
+// nothing writes *known again. So the read needs no lock. A grace row can have
+// empty ranges until the writer stores a row in flight (see moveEnds). A nil
+// known protects no row: a writer with no StartClock call has no such rows.
+func newJumpExpireStep(known *int64) retentionStep {
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		return execCount(ctx, tx, memDeleted, deleteJumpSQL, limit)
+		keep := int64(math.MaxInt64)
+		if known != nil {
+			keep = *known
+		}
+		return execCount(ctx, tx, memDeleted, deleteJumpSQL, keep, limit)
 	}
 }
 
