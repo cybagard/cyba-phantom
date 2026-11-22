@@ -993,9 +993,9 @@ func TestTU27JumpRowWithJOfZeroChangesNoRow(t *testing.T) {
 	checkCorrections(t, jumps, jumps, 8)
 }
 
-// T-U-27, T-U-30: a batch that moves an end writes the key with the rowid floor
-// in the same transaction, with synchronous=FULL. The floor is above the new
-// rowids. A batch with a row at `at` moves no end and writes no key. A batch
+// T-U-27, T-U-30: a batch that moves an end writes the key with the rowid
+// floor. The key is in the same transaction, with synchronous=FULL. The floor
+// is above the new rowids. A batch with a row at `at` moves no end and writes no key. A batch
 // that rolls back leaves the key, the floor in memory and the ends unchanged.
 func TestTU30MoveOfAnEndWritesTheKeyWithTheRowidFloor(t *testing.T) {
 	r, f := clockRig(t)
@@ -1058,8 +1058,8 @@ func runAtMs(t *testing.T, r *rig, st int64) {
 	}
 }
 
-// T-U-11, T-U-30: the run keeps a grace row of its own process that has empty
-// ranges, 100 d after the jump. The run deletes an empty row of an earlier
+// T-U-11, T-U-30: 100 d after a grace jump, the run keeps the grace row of its
+// own process with empty ranges. The run deletes an empty row of an earlier
 // process.
 func TestTU30ScheduleRunKeepsTheGraceRowOfThisProcess(t *testing.T) {
 	r, f := newRig(t, 8), &fakeSrc{}
