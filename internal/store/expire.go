@@ -89,8 +89,8 @@ func newGatedExpireStep(q string, cost int, tDel time.Time, days int,
 // cutoff (SEC-39). days is store.retention_days.events. The day step has a day
 // in progress or a next day (see rollupWorkDay). A chunk keeps each row with a
 // stored ts at or after the start of that day. This holds for each sum of j.
-// The day step can stop early with a request row left. When it has no such
-// day, the chunk has no start to keep.
+// The day step can stop early with a request row left. With no day in
+// progress and no next day, this rule keeps no row.
 //
 // With no clock_jump range, the step runs the plain statement with the cutoff
 // capped at that start. The behavior is the same as before the correction.
@@ -150,8 +150,10 @@ func newJumpExpireStep() retentionStep {
 }
 
 // newCounterDeleteStep returns the step that deletes the ip_counter rows with
-// day before the UTC date of the cutoff (SEC-39). The cutoff is S minus `days`
-// x 24 h, with days from store.retention_days.raw. The caller gives S as tDel.
+// day before the UTC date of the cutoff (SEC-39). The cutoff is tDel minus
+// `days` x 24 h. The retention run gives S as tDel, with days from
+// store.retention_days.raw. With days = 1, the DB cap sets the cutoff to the
+// end of a UTC day (see dayCut).
 // A row of the date of the cutoff stays. An ip_counter row has no rowid range
 // in clock_jump, so it has no correction. Each call deletes at most `limit`
 // rows and returns their count. With days outside 1 to 30, or a zero tDel, the

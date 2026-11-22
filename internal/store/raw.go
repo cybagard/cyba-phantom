@@ -165,10 +165,11 @@ func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retenti
 }
 
 // newRawDeleteStep returns the step that deletes the refused and beacon rows
-// with ts before the cutoff (SEC-39). The cutoff is S minus `days` x 24 h. The
-// caller gives S as tDel. It rolls up no row. It reads no clock. Each call
-// deletes at most `limit` rows and returns their count. With days outside 1 to
-// 30, or a zero tDel, the step runs no statement and returns an error.
+// with ts before the cutoff (SEC-39). The cutoff is tDel minus `days` x 24 h.
+// With days = 1, the DB cap sets the cutoff to the end of a UTC day (see
+// dayCut). It rolls up no row. It reads no clock. Each call deletes at most
+// `limit` rows and returns their count. With days outside 1 to 30, or a zero
+// tDel, the step runs no statement and returns an error.
 //
 // The step has no clock_jump correction. The DB cap uses it. The cap evicts by
 // the oldest UTC day in stored time. A correction would keep a row that a

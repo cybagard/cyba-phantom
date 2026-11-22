@@ -92,7 +92,7 @@ func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 }
 
 // An int128 is a number of 128 bits in two's complement form. It holds the sum
-// of any count of j, with no wrap.
+// of fewer than 2^64 values of j, with no wrap.
 type int128 struct {
 	hi int64
 	lo uint64

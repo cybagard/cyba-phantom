@@ -629,9 +629,9 @@ func TestTU27ReadStatementsSearchTheirIndexes(t *testing.T) {
 }
 
 // T-U-11: the DB cap keeps the plain raw delete. The cap evicts by the oldest
-// UTC day in stored time. A refused row at the day 1 is in a +200 d range. The
+// UTC day in stored time. A refused row on day 1 is in a +200 d range. The
 // corrected step would keep it, and the cap would stop. The cap evicts it, then
-// the session row of the day 3, and it leaves no row.
+// the session row of day 3, and it leaves no row.
 func TestTU11CapEvictsARefusedRowOfAForwardJumpRange(t *testing.T) {
 	r := newRig(t, 100)
 	addEvents(t, r.db, "refused", 1, capDay(1), 0, nil, nil)
