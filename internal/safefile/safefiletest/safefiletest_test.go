@@ -41,8 +41,8 @@ func main() {
 `
 
 // The program runs Set in another process, which the test cache cannot see.
-// The test logs the address of Set. The linker keeps Set in the test binary,
-// so a change to Set changes the binary and runs the test again.
+// The test logs the address of Set. The linker keeps Set in the test binary.
+// A change to Set then changes the binary, and the test runs again.
 func TestTS23_SetFailsOutsideTestBinary(t *testing.T) {
 	t.Logf("Set is at %p", safefiletest.Set)
 	goTool, err := exec.LookPath("go")
