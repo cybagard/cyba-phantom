@@ -3,11 +3,11 @@ package bundle
 import (
 	"bytes"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,17 +24,8 @@ type fetched struct {
 	oldArch, oldSig, arch, sig []byte
 }
 
-// noSeams fails the test when a seam of an earlier test is still set.
-func noSeams(t *testing.T) {
-	t.Helper()
-	if wrapTemp != nil || beforeRename != nil || afterTempRemove != nil || beforeSyncDir != nil {
-		t.Fatal("a test seam is set on entry")
-	}
-}
-
 func newFetched(t *testing.T) *fetched {
 	t.Helper()
-	noSeams(t)
 	e := running(t)
 	f := &fetched{env: e, p: e.observe(e.l)}
 	f.oldArch, f.oldSig = f.bytesOf("bundle/current.cbnd"), f.bytesOf("bundle/current.sig")
@@ -173,27 +164,29 @@ func TestTS20FetchedPathChecks(t *testing.T) {
 	}
 }
 
-// syncCount counts the Sync calls of a temporary file.
-type syncCount struct {
-	*os.File
-	n *int
+// isInstallTemp is true for the name of an install temporary file.
+func isInstallTemp(name string) bool {
+	return strings.HasSuffix(name, archiveTemp) || strings.HasSuffix(name, sigTemp)
 }
-
-func (s syncCount) Sync() error { *s.n++; return s.File.Sync() }
 
 // T-U-23: an accepted fetched bundle goes to disk in the order of SEC-25.
 // First two synced temporary files. Then the archive rename and the signature
-// file rename. Then the version state and the swap.
+// file rename. Then the version state and the swap. The hook of the rename step
+// gets the name of the temporary file. The final name is that name with no
+// ".tmp".
 func TestTU23FetchedInstallOrder(t *testing.T) {
 	f := newFetched(t)
 	syncs := 0
-	wrapTemp = func(w *os.File) tempFile { return syncCount{w, &syncs} }
 	var seen []string
-	beforeRename = func(from, to string) error {
-		seen = append(seen, fmt.Sprintf("%s>%s %s syncs=%d", from, to, f.snap(), syncs))
+	setStep(t, func(step, name string) error {
+		switch {
+		case step == "sync":
+			syncs++
+		case step == "rename" && isInstallTemp(name):
+			seen = append(seen, fmt.Sprintf("%s>%s %s syncs=%d", name, strings.TrimSuffix(name, ".tmp"), f.snap(), syncs))
+		}
 		return nil
-	}
-	t.Cleanup(func() { wrapTemp, beforeRename = nil, nil })
+	})
 	b, err := f.l.LoadFetched(f.arch, f.sig)
 	must(t, err)
 	want := []string{
@@ -311,7 +304,7 @@ func TestTU23RollForwardRenameFails(t *testing.T) {
 // bundle with this version, and the new pair on disk.
 func (f *fetched) startLoads(version string) {
 	f.t.Helper()
-	beforeRename = nil
+	stepFn = nil
 	b, err := f.loader("bundle/current.cbnd").Load(true)
 	if err != nil || b.Manifest().Version != version {
 		f.t.Fatalf("next start: %v, %v", b, err)
@@ -324,7 +317,6 @@ func (f *fetched) startLoads(version string) {
 // T-U-23: a roll-forward whose rename fails leaves the ring. The rename comes
 // before the swap of the key sets.
 func TestTU23RollForwardRenameKeepsRing(t *testing.T) {
-	noSeams(t)
 	e, install := newEnv(t), testInstall(t, 1)
 	key, l := keyOne(e), e.seedLoader(install)
 	e.putSeeded(key, ver(2), trapEntsWith(e.good(install, key, ver(2), seedA), "a")...)
@@ -462,7 +454,7 @@ func TestTU23ReloadClearsMark(t *testing.T) {
 		if !bytes.Equal(f.bytesOf("bundle/current.sig"), f.sig) {
 			t.Error("the install renamed the old temporary file over the signature file")
 		}
-		beforeRename = nil
+		stepFn = nil
 		if b, err := f.loader("bundle/current.cbnd").Load(true); err != nil || b.Manifest().Version != ver(4) {
 			t.Fatalf("next start: %v, %v", b, err)
 		}
@@ -497,8 +489,12 @@ func TestTU23MarkedFileMissing(t *testing.T) {
 			t.Errorf("after: %s", got)
 		}
 		var seen []string
-		beforeRename = func(from, to string) error { seen = append(seen, from+">"+to); return nil }
-		t.Cleanup(func() { beforeRename = nil })
+		setStep(t, func(step, name string) error {
+			if step == "rename" && isInstallTemp(name) {
+				seen = append(seen, name+">"+strings.TrimSuffix(name, ".tmp"))
+			}
+			return nil
+		})
 		arch := build(ent{name: "manifest.json", data: []byte(mf(ver(5)))})
 		if _, err := f.l.LoadFetched(arch, f.sign(arch)); err != nil || len(seen) != 2 {
 			t.Errorf("next install: %v, renames %v", err, seen)
@@ -532,36 +528,38 @@ func TestTU23MarkedFileMissing(t *testing.T) {
 	})
 }
 
-// T-U-23: syncDir gives the error of the open of the directory. It also gives
-// the error of the Sync call, and a Close call does not hide it.
+// T-U-23: a failed directory sync of the install gives ErrInstallFault and
+// keeps the files. The sync comes after the rename of the signature file, so
+// the next start loads the new pair.
 func TestTU23SyncDirErrors(t *testing.T) {
-	t.Run("closed root", func(t *testing.T) {
-		root, err := os.OpenRoot(t.TempDir())
-		must(t, err)
-		must(t, root.Close())
-		if err := syncDir(root); !errors.Is(err, os.ErrClosed) {
-			t.Errorf("got %v; want os.ErrClosed", err)
+	t.Run("after the signature rename", func(t *testing.T) {
+		f := newFetched(t)
+		run := f.l.Current()
+		failStep(t, "dirsync", ".", errInjected)
+		if b, err := f.l.LoadFetched(f.arch, f.sig); b != nil || err != ErrInstallFault {
+			t.Fatalf("got %v, %v", b, err)
 		}
+		if got := f.snap(); got != "cbnd=new-arch sig=new-sig ctmp=none stmp=none state="+ver(2) {
+			t.Errorf("after: %s", got)
+		}
+		if f.l.Current() != run || f.l.sigKept {
+			t.Error("the running bundle changed, or the mark is set")
+		}
+		f.startLoads(ver(3))
 	})
-	t.Run("sync fails", func(t *testing.T) {
-		// A directory of procfs refuses Sync. The test needs such a directory.
-		proc, err := os.OpenRoot("/proc")
-		if err != nil {
-			t.Skip("no /proc:", err)
+	// The sync after the rename of the kept file fails. The install then writes
+	// no temporary file of its own.
+	t.Run("after the kept file rename", func(t *testing.T) {
+		f := secondFetched(t)
+		failStep(t, "dirsync", ".", errInjected)
+		if b, err := f.l.LoadFetched(f.arch, f.sig); b != nil || err != ErrInstallFault {
+			t.Fatalf("got %v, %v", b, err)
 		}
-		defer proc.Close()
-		d, err := proc.Open(".")
-		must(t, err)
-		serr := d.Sync()
-		d.Close()
-		if serr == nil {
-			t.Skip("this system syncs /proc")
+		if got := f.snap(); got != "cbnd=old-arch sig=old-sig ctmp=none stmp=none state="+ver(2) {
+			t.Errorf("after: %s", got)
 		}
-		if errors.Unwrap(serr) == nil {
-			t.Fatalf("Sync error %v wraps no error", serr)
-		}
-		if err := syncDir(proc); !errors.Is(err, errors.Unwrap(serr)) {
-			t.Errorf("got %v; want %v", err, serr)
+		if f.l.sigKept {
+			t.Error("the mark is set after the rename")
 		}
 	})
 }
@@ -576,12 +574,16 @@ func TestTU23SecondInstallRenamesKeptFile(t *testing.T) {
 	t.Run("renames first", func(t *testing.T) {
 		f := second(t)
 		var seen []string
-		beforeRename = func(from, to string) error {
-			seen = append(seen, from+">"+to+" "+f.snap())
+		syncs := true
+		setStep(t, func(step, name string) error {
+			switch {
+			case step == "rename" && isInstallTemp(name):
+				seen = append(seen, name+">"+strings.TrimSuffix(name, ".tmp")+" "+f.snap())
+			case step == "dirsync" && syncs:
+				seen = append(seen, "sync "+f.snap())
+			}
 			return nil
-		}
-		beforeSyncDir = func() { seen = append(seen, "sync "+f.snap()) }
-		t.Cleanup(func() { beforeRename, beforeSyncDir = nil, nil })
+		})
 		_, err := f.l.LoadFetched(f.arch, f.sig)
 		must(t, err)
 		// One directory Sync follows the rename of the kept file, before the
@@ -603,7 +605,7 @@ func TestTU23SecondInstallRenamesKeptFile(t *testing.T) {
 		}
 		// The rename cleared the mark. The next install renames no kept file.
 		seen = nil
-		beforeSyncDir = nil
+		syncs = false
 		arch := build(ent{name: "manifest.json", data: []byte(mf(ver(5)))})
 		if _, err := f.l.LoadFetched(arch, f.sign(arch)); err != nil || len(seen) != 2 {
 			t.Errorf("third install: %v, renames %v", err, seen)
@@ -621,7 +623,7 @@ func TestTU23SecondInstallRenamesKeptFile(t *testing.T) {
 				if f.files() != before {
 					t.Error("the install wrote a file")
 				}
-				beforeRename = nil
+				stepFn = nil
 				if _, err := f.l.LoadFetched(f.arch, f.sig); err != nil {
 					t.Errorf("install after the fault: %v", err)
 				}
@@ -745,16 +747,12 @@ func TestTU23ReloadNoRollForward(t *testing.T) {
 	}
 }
 
-// failRenameTo makes each rename to dst fail until the test ends.
+// failRenameTo makes each rename to dst fail until the test ends. The hook of
+// the rename step gets the name of the temporary file, so the test matches
+// "<dst>.tmp".
 func failRenameTo(t *testing.T, dst string) {
 	t.Helper()
-	beforeRename = func(_, to string) error {
-		if to == dst {
-			return errInjected
-		}
-		return nil
-	}
-	t.Cleanup(func() { beforeRename = nil })
+	failStep(t, "rename", dst+".tmp", errInjected)
 }
 
 // crashAfterFirstRename makes the second rename of the install fail. The files
@@ -765,7 +763,7 @@ func (f *fetched) crashAfterFirstRename() {
 	if b, err := f.l.LoadFetched(f.arch, f.sig); b != nil || err != ErrInstallFault {
 		f.t.Fatalf("got %v, %v", b, err)
 	}
-	beforeRename = nil
+	stepFn = nil
 }
 
 // T-U-23: a failed write gives ErrInstallFault, no event and one fixed log
@@ -773,16 +771,11 @@ func (f *fetched) crashAfterFirstRename() {
 // first rename leaves the files as they were. A failure at or after it keeps
 // the files.
 func TestTU23FetchedWriteFails(t *testing.T) {
+	// temp fails one step of the temporary file of the archive (call 1) or of
+	// the signature file (call 2).
 	temp := func(call int, step string) func(f *fetched) {
-		return func(*fetched) {
-			n := 0
-			wrapTemp = func(w *os.File) tempFile {
-				n++
-				if n == call {
-					return faultyTemp{w, step}
-				}
-				return faultyTemp{w, "none"}
-			}
+		return func(f *fetched) {
+			failStep(f.t, step, [...]string{"current.cbnd.tmp", "current.sig.tmp"}[call-1], errInjected)
 		}
 	}
 	rename := func(dst string) func(f *fetched) {
@@ -795,16 +788,18 @@ func TestTU23FetchedWriteFails(t *testing.T) {
 		after string // empty: the listing of the directory does not change
 	}{
 		{"create", func(f *fetched) { must(f.t, os.MkdirAll(filepath.Join(f.state, "bundle/current.cbnd.tmp/x"), 0o700)) }, ""},
+		{"archive remove", temp(1, "remove"), ""}, {"archive create", temp(1, "create"), ""},
 		{"archive write", temp(1, "write"), ""}, {"archive sync", temp(1, "sync"), ""}, {"archive close", temp(1, "close"), ""},
+		{"sig remove", temp(2, "remove"), ""}, {"sig create", temp(2, "create"), ""},
 		{"sig write", temp(2, "write"), ""}, {"sig sync", temp(2, "sync"), ""}, {"sig close", temp(2, "close"), ""},
 		{"first rename", rename("current.cbnd"), "cbnd=old-arch sig=old-sig ctmp=new-arch stmp=new-sig" + kept},
 		{"second rename", rename("current.sig"), "cbnd=new-arch sig=old-sig ctmp=none stmp=new-sig" + kept},
+		{"directory sync", func(f *fetched) { failStep(f.t, "dirsync", ".", errInjected) }, "cbnd=new-arch sig=new-sig ctmp=none stmp=none" + kept},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFetched(t)
 			c.setup(f)
-			t.Cleanup(func() { wrapTemp, beforeRename = nil, nil })
 			before, run := f.files(), f.l.Current()
 			b, err := f.l.LoadFetched(f.arch, f.sig)
 			if code, ok := CodeOf(err); b != nil || err != ErrInstallFault || ok || code != 0 || err.Error() != "bundle: install fault" {
@@ -958,5 +953,68 @@ func TestTU23FetchedUnchanged(t *testing.T) {
 	f.events("")
 	if _, err := f.l.LoadFetched(f.arch, f.sig); err != nil || waits != 1 {
 		t.Errorf("a changed bundle: %v, waits %d", err, waits)
+	}
+}
+
+// T-S-38, T-U-23: a crash at each install step leaves a pair that the next
+// start loads. Before the archive rename, the next start loads the old
+// bundle. After the archive rename, the next start loads the new bundle, also
+// through the roll-forward.
+func TestTS38FetchedInstallCrashSafe(t *testing.T) {
+	type stop struct{ step, name string }
+	var stops []stop
+	for _, name := range []string{"current.cbnd.tmp", "current.sig.tmp"} {
+		for _, step := range []string{"remove", "create", "write", "sync", "close"} {
+			stops = append(stops, stop{step, name})
+		}
+	}
+	// The hook runs before the step, so a crash at the archive rename renames
+	// nothing, and the old bundle loads.
+	stops = append(stops, stop{"rename", "current.cbnd.tmp"}, stop{"rename", "current.sig.tmp"}, stop{"dirsync", "."})
+	for i, s := range stops {
+		t.Run(s.step+" "+s.name, func(t *testing.T) {
+			f := newFetched(t)
+			hit := false
+			setStep(t, func(step, name string) error {
+				if step == s.step && name == s.name && !hit {
+					hit = true
+					return safefiletest.Crash
+				}
+				return nil
+			})
+			if b, err := f.l.LoadFetched(f.arch, f.sig); b != nil || err == nil || !hit {
+				t.Fatalf("got %v, %v, hit %v", b, err, hit)
+			}
+			stepFn = nil
+			// The last two stops come after the archive rename.
+			wantNew := i >= len(stops)-2
+			b, err := f.loader("bundle/current.cbnd").Load(true)
+			if err != nil {
+				t.Fatalf("next start: %v", err)
+			}
+			want, files := ver(2), "cbnd=old-arch sig=old-sig ctmp=none stmp=none state="+ver(2)
+			if wantNew {
+				want, files = ver(3), "cbnd=new-arch sig=new-sig ctmp=none stmp=none state="+ver(3)
+			}
+			if b.Manifest().Version != want || f.snap() != files {
+				t.Errorf("next start: version %s, files %s", b.Manifest().Version, f.snap())
+			}
+		})
+	}
+}
+
+// T-S-38: the files of the version state and of a fetched pair have mode 0600
+// under umask 0377. The test sets the umask, so no t.Parallel.
+func TestTS38InstallModeUnderUmask(t *testing.T) {
+	f := newFetched(t)
+	old := syscall.Umask(0o377)
+	defer syscall.Umask(old)
+	if _, err := f.l.LoadFetched(f.arch, f.sig); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"current.cbnd", "current.sig", StateName} {
+		if fi, err := os.Stat(filepath.Join(f.state, "bundle", n)); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v %v", n, fi, err)
+		}
 	}
 }
