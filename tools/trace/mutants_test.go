@@ -133,10 +133,15 @@ func TestRunPrintsAtMostTheCapOfFindings(t *testing.T) {
 	}
 }
 
-func TestIsModeNamesTheFourModes(t *testing.T) {
-	for s, want := range map[string]bool{"matrix": true, "stamp": true, "all": true, "tests": true, "spec": false, "": false} {
-		if got := isMode(s); got != want {
-			t.Errorf("isMode(%q) = %v, want %v", s, got, want)
+func TestParseModeNamesTheFourModes(t *testing.T) {
+	for s, want := range map[string]mode{"matrix": modeMatrix, "stamp": modeStamp, "all": modeAll, "tests": modeTests} {
+		if got, ok := parseMode(s); !ok || got != want {
+			t.Errorf("parseMode(%q) = %v, %v, want %v, true", s, got, ok, want)
+		}
+	}
+	for _, s := range []string{"spec", "", "Matrix"} {
+		if _, ok := parseMode(s); ok {
+			t.Errorf("parseMode(%q) is a mode", s)
 		}
 	}
 }
@@ -156,8 +161,7 @@ func TestLoadSpecCapsAtTheBound(t *testing.T) {
 }
 
 func TestParseTestPlanKeepsARowWithTwoCells(t *testing.T) {
-	var f []string
-	got := parseTestPlan("| T-U-01 | FR-01 |\n", &f)
+	got, f := parseTestPlan("| T-U-01 | FR-01 |\n")
 	if len(f) != 0 || len(got) != 1 || !slices.Equal(got[0].covers, []string{"FR-01"}) {
 		t.Errorf("got %v, findings %v", got, f)
 	}
@@ -178,8 +182,7 @@ func TestParseMatrixFileGroups(t *testing.T) {
 		{"row on the first line", row, "08-traceability: row FR-01 lies outside a table (line 1)", -1, -1, -1, 0},
 		{"row on the third line", "a\nb\n" + row, "08-traceability: row FR-01 lies outside a table (line 3)", -1, -1, -1, 0},
 	} {
-		var f []string
-		_, groups := parseMatrixFile(c.text, &f)
+		_, groups, f := parseMatrixFile(c.text)
 		if c.finding != "" {
 			if !slices.Equal(f, []string{c.finding}) || len(groups) != 0 {
 				t.Errorf("%s: findings %v, want %q", c.name, f, c.finding)
@@ -246,8 +249,7 @@ func TestReemitTestsOrder(t *testing.T) {
 		{"duplicate ID", "T-U-01, T-U-01", "T-U-01", plan("T-U-01"), 0},
 		{"no-test marker stays", "— (no T-ID)", "— (no T-ID)", plan("T-U-01"), 0},
 	} {
-		var f []string
-		if got := reemitTests("FR-01", c.cell, c.tests, &f); got != c.want || len(f) != c.findings {
+		if got, f := reemitTests("FR-01", c.cell, c.tests); got != c.want || len(f) != c.findings {
 			t.Errorf("%s: got %q with %v, want %q with %d findings", c.name, got, f, c.want, c.findings)
 		}
 	}
@@ -256,8 +258,7 @@ func TestReemitTestsOrder(t *testing.T) {
 // TestProseItemFinding checks the text of the finding: it has the ID and
 // the item number, and never the token.
 func TestProseItemFinding(t *testing.T) {
-	var f []string
-	reemitTests("FR-01", "T-U-01, secret-token, T-U-02", plan("T-U-01", "T-U-02"), &f)
+	_, f := reemitTests("FR-01", "T-U-01, secret-token, T-U-02", plan("T-U-01", "T-U-02"))
 	want := []string{"08-traceability: FR-01 Tests cell has an item that is not a test reference (item 2)"}
 	if !slices.Equal(f, want) {
 		t.Errorf("findings %q, want %q", f, want)
@@ -291,8 +292,7 @@ func TestCellForms(t *testing.T) {
 		{"next in 07, numbers descend", "T-U-06, T-U-05", "T-U-06, T-U-05", flat},
 		{"canonical run and singles", "T-U-01..03, T-U-06", "T-U-01..03, T-U-06", flat},
 	} {
-		var f []string
-		got := reemitTests("FR-01", c.cell, c.tests, &f)
+		got, f := reemitTests("FR-01", c.cell, c.tests)
 		if got != c.want || len(f) != 0 {
 			t.Errorf("%s: got %q with %v, want %q", c.name, got, f, c.want)
 		}
