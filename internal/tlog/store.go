@@ -17,6 +17,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"slices"
@@ -164,6 +165,22 @@ type Store struct {
 	// written holds the width of each tile that WriteTile accepted since the
 	// last SetHead. The key has width 0.
 	written map[tlog.Tile]int
+
+	// dirty holds the directories of the tile files that WriteTile renamed or
+	// kept since the last SetHead. SetHead calls fsync on each of them.
+	dirty map[string]bool
+
+	// drop holds the stale files that WriteTile found since the last SetHead.
+	// SetHead deletes them after the fsync of dirty. Open leaves at most one
+	// partial file for each tile, so each tile has only a few.
+	drop []string
+
+	// synced holds the directories that this Store synced since Open. Each one
+	// has all its parents up to the log directory synced too. No sync error
+	// came after it. The set holds only the directories of the last batch that
+	// wrote a tile file, and their parents. So it does not grow with the log.
+	// A failed fsync of a directory clears it.
+	synced map[string]bool
 }
 
 // Open opens the log directory dir below the state directory. The path dir is
@@ -416,8 +433,8 @@ func batchTiles(old, n int64) int64 {
 }
 
 // syncExisting calls fsync on each directory in dirs that exists, and on its
-// parents up to the log directory. The store does not know which directories
-// are durable, so it syncs each one each time.
+// parents up to the log directory. Open uses it. At that time the store does
+// not know which directories are durable, so it syncs each one.
 func (s *Store) syncExisting(dirs []string) error {
 	return s.syncAll(slices.DeleteFunc(dirs, func(dir string) bool {
 		_, err := s.dir.Lstat(dir)
@@ -527,9 +544,18 @@ func readNames(read []tlog.Tile, empty string) string {
 // hash must be one that WriteTile accepted since the last SetHead. The root
 // computation does not read some newly covered full tiles. Each of them must
 // give its hash in the tile one level up. SetHead refuses a size that gives
-// new hashes to more than maxBatchTiles tiles. A refused call changes no
-// file, with one exception. The write can fail at the rename of the head file
-// or after it. Then the head file on disk can hold the new size and root. The
+// new hashes to more than maxBatchTiles tiles. A call that a check refuses
+// changes no file. After the checks, SetHead calls fsync on each directory that
+// WriteTile recorded, one time for each directory. A directory that the Store
+// did not sync before also gets fsync on its parents. This goes up to the first
+// parent that the Store synced before. All this comes before the head file.
+// If an fsync fails, SetHead returns an error and writes no head file. The
+// error does not match ErrHeadOnDisk, and the Store forgets the directories
+// that it synced. Then SetHead deletes the stale files that WriteTile found.
+// It calls no fsync on their directories. Then it writes the head file: fsync
+// of the file, rename, and fsync of the log directory. The write can fail at
+// the rename of the head file or after it. Then the head file on disk can hold
+// the new size and root. The
 // Store keeps the old tree head in memory. The error matches ErrHeadOnDisk,
 // and Log stops on it. The caller must close the Store and open it again.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
@@ -577,10 +603,69 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 			}
 		}
 	}
+	if err := s.syncBatch(); err != nil {
+		return err
+	}
+	// The new files are durable, so the files that they replace are not the
+	// only copy. Delete them now. A file that a crash brings back is stale,
+	// and Open deletes it.
+	if err := s.unlinkDropped(); err != nil {
+		return err
+	}
 	if err := s.writeHead(next); err != nil {
+		// The head file can be on disk. Do not trust a directory as synced.
+		s.synced = nil
 		return err
 	}
 	clear(s.written)
+	return nil
+}
+
+// syncBatch calls fsync on each directory in dirty, one time for each
+// directory. A directory that is not in synced can be new. So syncBatch also
+// calls fsync on its parents. It stops after the first parent that is in
+// synced, because that parent can have a new entry. A directory that is in
+// synced needs no fsync on its parents. If a call fails, syncBatch clears
+// synced and returns the error. After success, synced holds the directories of
+// this batch and their parents, and dirty is empty. If dirty is empty,
+// syncBatch does nothing.
+func (s *Store) syncBatch() error {
+	if len(s.dirty) == 0 {
+		return nil
+	}
+	done := map[string]bool{}
+	for _, dir := range slices.Sorted(maps.Keys(s.dirty)) {
+		for d := dir; !done[d]; d = path.Dir(d) {
+			if err := syncOneDir(s.dir, d); err != nil {
+				s.synced = nil
+				return newError(dirName(err, d), syncRule(err))
+			}
+			done[d] = true
+			if s.synced[d] || d == "." {
+				break
+			}
+		}
+	}
+	// The parents above the first synced directory are in the old set. Each
+	// one has all its own parents synced.
+	next := make(map[string]bool, len(done))
+	for d := range done {
+		for ; !next[d]; d = path.Dir(d) {
+			next[d] = true
+		}
+	}
+	s.synced = next
+	clear(s.dirty)
+	return nil
+}
+
+// unlinkDropped deletes the files in drop. It calls no fsync on their
+// directories. A file that a crash brings back is stale, and Open deletes it.
+func (s *Store) unlinkDropped() error {
+	if _, err := s.unlink(s.drop); err != nil {
+		return err
+	}
+	s.drop = nil
 	return nil
 }
 
@@ -639,14 +724,16 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // in a covered hash, the call returns an error. A tile that the tree head
 // covers in full is never written again. WriteTile replaces hashes beyond the
 // tree head with a temporary file and an atomic rename. It writes nothing if
-// the tree head covers all of data. It also writes nothing if a stored file has
-// the data already. If that data has hashes beyond the tree head, WriteTile
-// calls fsync on the directories of the stored file. If an earlier call failed
-// after the rename, this fsync makes the rename durable. A stored file can be
-// wider than the data and differ beyond the tree head. Such a file is stale.
-// WriteTile writes the new file first, then deletes the stale files. After the
-// write, the store deletes the narrower partial files, so that at most one
-// partial file stays. WriteTile accepts at most maxBatchTiles different tiles
+// the tree head covers all of data. WriteTile calls no fsync on a directory.
+// It records the directory of each file that it renames. A stored file can
+// have the data already. If the data has hashes beyond the tree head,
+// WriteTile records the directory of that file too. An earlier call can have
+// failed after the rename. Then the fsync of SetHead makes the rename durable.
+// A stored file can be wider than the data and differ beyond the tree head.
+// Such a file is stale. WriteTile writes the new file first. It does not
+// delete a file. It records the stale files and the narrower partial files.
+// SetHead deletes them after the fsync, so that at most one partial file
+// stays. WriteTile accepts at most maxBatchTiles different tiles
 // with hashes beyond the tree head between two calls of SetHead. WriteTile
 // first checks each directory of the tile path. Each must be a real directory
 // and not a link. This check comes before any write, rename, or delete.
@@ -688,13 +775,11 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	switch {
 	case t.W <= c:
 	case t.W < w && bytes.Equal(data, old[:len(data)]), t.W == w && bytes.Equal(data, old):
-		// The stored file has the data and this call writes nothing. If an
-		// earlier call renamed the file and then failed to sync its directory,
-		// this fsync makes the rename durable. The head must not cover the
+		// The stored file has the data and this call writes nothing. An earlier
+		// call can have renamed the file and then failed to sync its directory.
+		// SetHead syncs the directory of the file. The head must not cover the
 		// hashes before that sync works.
-		if err := syncDirs(s.dir, path.Dir(name)); err != nil {
-			return newError(name, ruleWrite)
-		}
+		s.markDirty(path.Dir(name))
 	default:
 		// Each other file of the tile must agree in the covered hashes. This
 		// includes the file that the rename replaces. Check before the write,
@@ -710,7 +795,7 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 			keep = t.W
 		}
 	}
-	if err := s.tidy(t, keep); err != nil {
+	if err := s.queueStale(t, keep); err != nil {
 		return err
 	}
 	if t.W > c {
@@ -731,7 +816,9 @@ func tilePath(t tlog.Tile, w int) string {
 }
 
 // partials lists the partial files and the temporary files of tile t. A name
-// counts only if it is a width in decimal with no extra characters.
+// counts only if it is a width in decimal with no extra characters. A file in
+// drop is not in the list: an earlier WriteTile checked it, and SetHead deletes
+// it. widest skips it too.
 func (s *Store) partials(t tlog.Tile) (widths []int, tmps []string, err error) {
 	dir := path.Dir(tilePath(t, 1))
 	entries, err := s.names(dir, maxPartialNames)
@@ -750,9 +837,10 @@ func (s *Store) partials(t tlog.Tile) (widths []int, tmps []string, err error) {
 		if err != nil || w < 1 || w >= fullWidth || strconv.Itoa(w) != base {
 			continue
 		}
-		if isTmp {
+		switch {
+		case isTmp:
 			tmps = append(tmps, name)
-		} else {
+		case !slices.Contains(s.drop, tilePath(t, w)):
 			widths = append(widths, w)
 		}
 	}
@@ -771,6 +859,9 @@ type tileFile struct {
 func (s *Store) widest(t tlog.Tile, widths []int) (tileFile, error) {
 	w := fullWidth
 	b, err := s.readFile(tilePath(t, w), w*tlog.HashSize)
+	if slices.Contains(s.drop, tilePath(t, w)) {
+		err = fs.ErrNotExist
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		if len(widths) == 0 {
 			return tileFile{}, nil
@@ -784,13 +875,23 @@ func (s *Store) widest(t tlog.Tile, widths []int) (tileFile, error) {
 	return tileFile{w, b, tilePath(t, w)}, nil
 }
 
-// tidy deletes the files that stale returns for tile t.
-func (s *Store) tidy(t tlog.Tile, keep int) error {
+// queueStale adds the files that stale returns for tile t to drop. SetHead
+// deletes them after the fsync of the directories of the batch.
+func (s *Store) queueStale(t tlog.Tile, keep int) error {
 	rm, err := s.stale(t, keep, s.committed(t))
 	if err != nil {
 		return err
 	}
-	return s.remove(rm)
+	s.drop = append(s.drop, rm...)
+	return nil
+}
+
+// markDirty records that SetHead must call fsync on the directory dir.
+func (s *Store) markDirty(dir string) {
+	if s.dirty == nil {
+		s.dirty = map[string]bool{}
+	}
+	s.dirty[dir] = true
 }
 
 // stale checks the files of tile t against c, the number of hashes that the
@@ -882,16 +983,25 @@ func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) ([]string, erro
 // remove deletes the files in names, in order, and then calls fsync on their
 // directories. A name that is not there is skipped.
 func (s *Store) remove(names []string) error {
-	var dirs []string
+	dirs, err := s.unlink(names)
+	if err != nil {
+		return err
+	}
+	return s.syncAll(dirs)
+}
+
+// unlink deletes the files in names, in order, and returns their directories.
+// It calls no fsync. A name that is not there is skipped.
+func (s *Store) unlink(names []string) (dirs []string, err error) {
 	for _, name := range names {
 		if err := s.dir.Remove(name); errors.Is(err, fs.ErrNotExist) {
 			continue
 		} else if err != nil {
-			return newError(name, ruleWrite)
+			return nil, newError(name, ruleWrite)
 		}
 		dirs = append(dirs, path.Dir(name))
 	}
-	return s.syncAll(dirs)
+	return dirs, nil
 }
 
 // names lists the directory dir in batches. It returns errTooMany if the
@@ -1145,12 +1255,16 @@ func fileRule(err error) string {
 	return ruleRead
 }
 
-// writeFile writes name in four steps: a temporary file in the same
-// directory, fsync of the file, rename, and fsync of the directories. It
-// deletes an old temporary file first and makes the new one with O_EXCL and
-// mode 0600. The store does not change a mode afterwards. Each error
-// after the rename (the open or the fsync of a directory) has the type
-// *renamedError. For the head file, each error of the rename has it too.
+// writeFile writes name in four steps: a temporary file, fsync of the file,
+// rename, and fsync of the directory. The temporary file is in the same
+// directory. It deletes an old temporary file first. It makes the new one with
+// O_EXCL and mode 0600. The store does not change a mode afterwards. For the
+// head file,
+// the last step is fsync of the log directory. For a tile file, writeFile
+// calls no fsync on a directory. It records the directory, and SetHead syncs
+// it before the head file. Each error after the rename has the type
+// *renamedError. This includes the open or the fsync of a directory. For the
+// head file, each error of the rename has it too.
 func (s *Store) writeFile(name string, data []byte) error {
 	dir := path.Dir(name)
 	if err := s.dir.MkdirAll(dir, dirMode); err != nil {
@@ -1177,12 +1291,17 @@ func (s *Store) writeFile(name string, data []byte) error {
 			// A rename can take effect and still return an error. For the head
 			// file, treat each error of the rename as an error after it.
 			// A tile rename keeps the plain error. WriteTile maps both to the
-			// same rule. A retry of the tile finds the file and syncs the
-			// directories of the file.
+			// same rule. A retry of the tile finds the file, and SetHead syncs
+			// the directory of the file.
 			err = &renamedError{err}
 		}
 	}
 	if err == nil {
+		if name != headName {
+			// SetHead syncs the directory one time for the batch.
+			s.markDirty(dir)
+			return nil
+		}
 		if err := syncDirs(s.dir, dir); err != nil {
 			return &renamedError{err}
 		}
