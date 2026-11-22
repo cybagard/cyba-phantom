@@ -142,9 +142,35 @@ func (l *trackedListener) Close() error { l.closed.Store(true); return l.Listene
 // isBound reports whether serve took the listener and has not closed it.
 func (l *trackedListener) isBound() bool { return l.taken.Load() && !l.closed.Load() }
 
+var (
+	seamsMu   sync.Mutex
+	testSeams = map[*testing.T]*seams{}
+)
+
+// seamsOf returns the seams that the helpers of t set. A nil field gives the
+// default step. The entry ends with the test. Set the fields before the
+// launch. A launch takes a copy.
+func seamsOf(t *testing.T) *seams {
+	seamsMu.Lock()
+	defer seamsMu.Unlock()
+	sm, ok := testSeams[t]
+	if !ok {
+		sm = &seams{}
+		testSeams[t] = sm
+		t.Cleanup(func() {
+			seamsMu.Lock()
+			defer seamsMu.Unlock()
+			delete(testSeams, t)
+		})
+	}
+	return sm
+}
+
 // openListeners opens the https and the http listener on a loopback port. It keeps them open until the test
-// ends. It replaces the listen seam until then. A listen call for the address of one of them gives that
-// listener. Any other address goes to the real listen. So no port is closed and bound again.
+// ends. It sets the listen seam of t (see seamsOf).
+// A listen call for the address of one of them gives that
+// listener. Any other address goes to the earlier listen seam of t, or to the
+// default. So no port is closed and bound again.
 // It also gives an address for the ACME CA. The host is a name below .invalid.
 // RFC 6761 reserves that name, but Go still looks it up. On Linux, Go asks
 // for A and AAAA, for the name and for the name with each search domain.
@@ -163,9 +189,10 @@ func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 	https, plain = open(), open()
 	byAddr := map[string]*trackedListener{https.Addr().String(): https, plain.Addr().String(): plain}
 	var asks atomic.Int64
-	old := listen
-	t.Cleanup(func() { listen = old })
-	listen = func(network, addr string) (net.Listener, error) {
+	sm := seamsOf(t)
+	prev := sm.listen
+	sm.listen = func(network, addr string) (net.Listener, error) {
+		old := seams{listen: prev}.orDefault().listen
 		l := byAddr[addr]
 		if l == nil {
 			return old(network, addr)
@@ -260,6 +287,7 @@ func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *
 func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
+	sm := *seamsOf(t)
 	// Before the wait for serve below, so the fence closes after it.
 	fences := fenceCache(t)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -267,7 +295,7 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 	atBegin := readPressure()
 	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin, fences: fences}
 	go func() {
-		r.code = serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: c, p: p, d: d, stdout: r.out, stderr: &r.err})
+		r.code = serveWith(ctx, serveArgs{seams: sm, stop: cancel, cfg: cfg, c: c, p: p, d: d, stdout: r.out, stderr: &r.err})
 		close(r.done)
 	}()
 	t.Cleanup(func() {
@@ -285,11 +313,12 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 // The serveSetup seam gives it p and realDeps. The waitStop seam holds serve
 // until r.cancel runs, so the test needs no signal.
 // The function setup runs in the serveSetup seam, after serve set its
-// signal handlers. It can be nil.
+// signal handlers. It can be nil. It gives the seams of t to serveOn.
 func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, setup func()) *running {
-	oldLog, oldSetup, oldWait := log.Writer(), serveSetup, waitStop
-	t.Cleanup(func() { log.SetOutput(oldLog); serveSetup, waitStop = oldSetup, oldWait })
-	serveSetup = func(startParams) (startParams, startDeps) {
+	oldLog := log.Writer()
+	t.Cleanup(func() { log.SetOutput(oldLog) })
+	sm := *seamsOf(t)
+	sm.serveSetup = func(startParams) (startParams, startDeps) {
 		if setup != nil {
 			setup()
 		}
@@ -298,11 +327,11 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, 
 	// Before the wait for serve below, so the fence closes after it.
 	fences := fenceCache(t)
 	hold := make(chan struct{})
-	waitStop = func(context.Context) { <-hold }
+	sm.waitStop = func(context.Context) { <-hold }
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
 	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin, fences: fences}
-	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
+	go func() { r.code = serveOn(sm, cfg, c, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		r.cancel()
 		select {
@@ -314,13 +343,14 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, 
 	return r
 }
 
-// captureServer wraps newServer until the test ends. The returned function gives the server that serveWith made.
+// captureServer wraps the newServer seam of t.
+// The returned function gives the server that serveWith made.
 func captureServer(t *testing.T) func() *listener.Server {
 	var srv *listener.Server
-	old := newServer
-	t.Cleanup(func() { newServer = old })
-	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
-		s, err := old(c, h)
+	sm := seamsOf(t)
+	prev := sm.newServer
+	sm.newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+		s, err := seams{newServer: prev}.orDefault().newServer(c, h)
 		srv = s
 		return s, err
 	}
@@ -343,14 +373,13 @@ func (r *running) awaitErrorLines(t *testing.T, srv *listener.Server, n uint64) 
 	}
 }
 
-// closedAtReturn replaces served until the test ends. The returned function gives, for each serve call that
+// closedAtReturn sets the served seam of t.
+// The returned function gives, for each serve call that
 // returned, whether the queue *q was closed then. A nil *q (no writer started) counts as not closed.
 func closedAtReturn(t *testing.T, q **event.Queue) func() []bool {
 	var mu sync.Mutex
 	var closed []bool
-	old := served
-	t.Cleanup(func() { served = old })
-	served = func() { mu.Lock(); closed = append(closed, *q != nil && (*q).Closed()); mu.Unlock() }
+	seamsOf(t).served = func() { mu.Lock(); closed = append(closed, *q != nil && (*q).Closed()); mu.Unlock() }
 	return func() []bool { mu.Lock(); defer mu.Unlock(); return slices.Clone(closed) }
 }
 
@@ -547,9 +576,12 @@ func TestTS16_WildcardListen(t *testing.T) {
 			// With a cached certificate the client makes no order.
 			seedCache(t, p, caURL.Str)
 			var got listener.ACMEParams
-			oldNew := newACME
-			t.Cleanup(func() { newACME = oldNew })
-			newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return oldNew(ap) }
+			sm := seamsOf(t)
+			prevNew := sm.newACME
+			sm.newACME = func(ap listener.ACMEParams) (*listener.ACME, error) {
+				got = ap
+				return seams{newACME: prevNew}.orDefault().newACME(ap)
+			}
 			before := listenSockets(t)
 			r := launchServe(t, cfg, p, realDeps)
 			r.waitStarted(t)
@@ -633,9 +665,8 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 		note(fmt.Sprint("store bound=", bound()))
 		return tlog.OpenLog(r, dir)
 	}
-	oldStart, oldStop, oldServed := startACME, stopACME, served
-	t.Cleanup(func() { startACME, stopACME, served = oldStart, oldStop, oldServed })
-	startACME = func(ctx context.Context, a *listener.ACME) error {
+	sm := seamsOf(t)
+	sm.startACME = func(ctx context.Context, a *listener.ACME) error {
 		note(fmt.Sprint("acme bound=", bound()))
 		return a.Start(ctx)
 	}
@@ -643,7 +674,7 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 	stopSeen := make(chan struct{})
 	markStop := sync.OnceFunc(func() { close(stopSeen) })
 	var holdOne sync.Once
-	served = func() {
+	sm.served = func() {
 		// The first serve call to return waits here until stopACME
 		// runs, or until holdServed ends. With the correct order,
 		// serveWith calls stopACME only after this call returns, so
@@ -661,7 +692,7 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 		mu.Unlock()
 		note(fmt.Sprint("served closed=", q.Closed()))
 	}
-	stopACME = func(a *listener.ACME) {
+	sm.stopACME = func(a *listener.ACME) {
 		mu.Lock()
 		n := returned
 		mu.Unlock()
@@ -755,11 +786,9 @@ func TestTI03_ColdStart(t *testing.T) {
 	der := seedCache(t, p, ca.Str)
 	before := runtime.NumGoroutine()
 	var warns atomic.Int32
-	oldWarn := warnCerts
-	t.Cleanup(func() { warnCerts = oldWarn })
-	warnCerts = func(s *listener.CertSource, ctx context.Context, lg *slog.Logger) {
+	seamsOf(t).warnCerts = func(s *listener.CertSource, ctx context.Context, lg *slog.Logger) {
 		warns.Add(1)
-		oldWarn(s, ctx, lg)
+		seams{}.orDefault().warnCerts(s, ctx, lg)
 	}
 	r := launchServe(t, cfg, p, realDeps)
 	// The wait comes first, so an early end of serve shows as "ended before the start line", not as a handshake error.
@@ -899,13 +928,12 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 			}
 			var der []byte
 			var stops atomic.Int32
-			oldNew, oldStart, oldStop := newACME, startACME, stopACME
-			t.Cleanup(func() { newACME, startACME, stopACME = oldNew, oldStart, oldStop })
-			stopACME = func(a *listener.ACME) { stops.Add(1); a.Stop() }
+			sm := seamsOf(t)
+			sm.stopACME = func(a *listener.ACME) { stops.Add(1); a.Stop() }
 			var news atomic.Int32
 			if c.newFails {
 				// The value is not nil. So serve must reset it on the error.
-				newACME = func(listener.ACMEParams) (*listener.ACME, error) {
+				sm.newACME = func(listener.ACMEParams) (*listener.ACME, error) {
 					news.Add(1)
 					return &listener.ACME{}, errors.New("test error")
 				}
@@ -913,7 +941,7 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 			if c.cached {
 				ca, _ := cfg.Get("acme.ca")
 				der = seedCache(t, p, ca.Str)
-				startACME = func(ctx context.Context, a *listener.ACME) error { a.Start(ctx); return errors.New("test error") }
+				sm.startACME = func(ctx context.Context, a *listener.ACME) error { a.Start(ctx); return errors.New("test error") }
 			}
 			server := captureServer(t)
 			var q *event.Queue // stays nil when the state directory is missing: no writer starts
@@ -983,14 +1011,12 @@ func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
 	var got listener.Config
-	oldNew := newServer
-	t.Cleanup(func() { newServer = oldNew })
-	newServer = func(c listener.Config, _ http.Handler) (*listener.Server, error) {
+	seamsOf(t).newServer = func(c listener.Config, _ http.Handler) (*listener.Server, error) {
 		got = c
 		return nil, errors.New("test error")
 	}
 	var q *event.Queue
-	if code := serveWith(t.Context(), serveArgs{stop: func() {}, cfg: cfg, c: content{}, p: tempState(t, cfg), d: depsWithQueue(&q), stdout: io.Discard, stderr: io.Discard}); code != 1 {
+	if code := serveWith(t.Context(), serveArgs{seams: *seamsOf(t), stop: func() {}, cfg: cfg, c: content{}, p: tempState(t, cfg), d: depsWithQueue(&q), stdout: io.Discard, stderr: io.Discard}); code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
 	if q == nil || got.Queue != q || got.Counters == nil || !q.Closed() {
@@ -1023,15 +1049,13 @@ func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
-	oldNew := newServer
-	t.Cleanup(func() { newServer = oldNew })
-	newServer = func(listener.Config, http.Handler) (*listener.Server, error) { return nil, errors.New("test error") }
+	seamsOf(t).newServer = func(listener.Config, http.Handler) (*listener.Server, error) { return nil, errors.New("test error") }
 	var q *event.Queue
 	var db *sql.DB
 	p, d := tempState(t, cfg), depsWithDB(depsWithQueue(&q), &db)
 	var stdout, stderr strings.Builder
 	before := goroutineBlocks()
-	code := serveWith(t.Context(), serveArgs{stop: func() {}, cfg: cfg, c: content{}, p: p, d: d, stdout: &stdout, stderr: &stderr})
+	code := serveWith(t.Context(), serveArgs{seams: *seamsOf(t), stop: func() {}, cfg: cfg, c: content{}, p: p, d: d, stdout: &stdout, stderr: &stderr})
 	after := goroutineBlocks()
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: decoy listener does not start\n") || stdout.Len() != 0 {
 		t.Errorf("exit %d, stderr %q, stdout %q; want 1, the fixed line and no stdout", code, stderr.String(), stdout.String())
@@ -1104,6 +1128,23 @@ func runtimeGoroutine(block string) bool {
 func endedGoroutine(block string) bool {
 	_, rest, _ := strings.Cut(block, "\n")
 	return strings.HasPrefix(rest, "runtime.goexit1(")
+}
+
+// TestTI03_SeamsDefault checks that a nil field of seams gives a default step
+// and that a field that is set stays. Each field of the zero value gets a step.
+func TestTI03_SeamsDefault(t *testing.T) {
+	got := reflect.ValueOf(seams{}.orDefault())
+	for i := range got.NumField() {
+		if got.Field(i).IsNil() {
+			t.Errorf("field %s of the default seams is nil", got.Type().Field(i).Name)
+		}
+	}
+	var served int
+	sm := seams{served: func() { served++ }}.orDefault()
+	sm.served()
+	if served != 1 {
+		t.Errorf("the set served step ran %d times, want 1", served)
+	}
 }
 
 func TestTI03_EndedGoroutine(t *testing.T) {
@@ -1200,23 +1241,22 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	t.Cleanup(func() { signal.Stop(sig) })
 	var q *event.Queue
 	d, p := depsWithQueue(&q), tempState(t, cfg)
-	oldSetup, oldLog := serveSetup, log.Writer()
-	t.Cleanup(func() { serveSetup = oldSetup; log.SetOutput(oldLog) })
-	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
+	oldLog := log.Writer()
+	t.Cleanup(func() { log.SetOutput(oldLog) })
 	fenceCache(t) // before the cleanup of serve below, so it runs after it
 	closed := closedAtReturn(t, &q)
 	waiting, sent := make(chan struct{}), make(chan struct{})
 	// release frees serve from the wrapper of waitStop.
 	release := sync.OnceFunc(func() { close(sent) })
-	oldWait := waitStop
-	t.Cleanup(func() { waitStop = oldWait })
-	waitStop = func(ctx context.Context) {
+	sm := *seamsOf(t)
+	sm.serveSetup = func(startParams) (startParams, startDeps) { return p, d }
+	sm.waitStop = func(ctx context.Context) {
 		close(waiting)
 		<-sent
-		oldWait(ctx)
+		seams{}.orDefault().waitStop(ctx)
 	}
 	r := &running{done: make(chan struct{}), out: newStartWriter()}
-	go func() { r.code = serve(cfg, content{}, r.out, &r.err); close(r.done) }()
+	go func() { r.code = serveOn(sm, cfg, content{}, r.out, &r.err); close(r.done) }()
 	// sendSigterm sends one SIGTERM and waits until sig gets it.
 	// A SIGTERM that comes after signal.Stop ends the process.
 	// Thus the test waits for each delivery before it continues.
@@ -1301,9 +1341,7 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 	// serve calls stopACME after the servers stopped,
 	// and before the store closes.
 	stopped := make(chan time.Time, 1)
-	oldStop := stopACME
-	t.Cleanup(func() { stopACME = oldStop })
-	stopACME = func(a *listener.ACME) { stopped <- time.Now(); oldStop(a) }
+	seamsOf(t).stopACME = func(a *listener.ACME) { stopped <- time.Now(); seams{}.orDefault().stopACME(a) }
 	r := launchServe(t, cfg, p, realDeps)
 	r.waitStarted(t)
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", https.Addr().String(), &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
@@ -1350,14 +1388,11 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 // while the handler runs, so it fails the bound.
 func TestTU23_StopWaitIsBounded(t *testing.T) {
 	stopped := make(chan time.Time, 1)
-	oldStop := stopACME
-	t.Cleanup(func() { stopACME = oldStop })
-	stopACME = func(a *listener.ACME) { stopped <- time.Now(); oldStop(a) }
+	sm := seamsOf(t)
+	sm.stopACME = func(a *listener.ACME) { stopped <- time.Now(); seams{}.orDefault().stopACME(a) }
 	inside, release := make(chan struct{}, 1), make(chan struct{})
-	oldServer := newServer
-	t.Cleanup(func() { newServer = oldServer })
-	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
-		return oldServer(c, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	sm.newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+		return seams{}.orDefault().newServer(c, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			inside <- struct{}{}
 			<-release
 		}))
@@ -1549,15 +1584,15 @@ func startMixed(t *testing.T, o mixOpt) *mixed {
 		o.prep(t, p)
 	}
 	m := &mixed{cfg: cfg, c: c, p: p, https: https.Addr().String(), plain: plain.Addr().String()}
-	oldWarn, oldServer := warnCerts, newServer
-	t.Cleanup(func() { warnCerts, newServer = oldWarn, oldServer })
-	warnCerts = func(s *listener.CertSource, ctx context.Context, lg *slog.Logger) {
+	sm := seamsOf(t)
+	prevWarn, prevServer := sm.warnCerts, sm.newServer
+	sm.warnCerts = func(s *listener.CertSource, ctx context.Context, lg *slog.Logger) {
 		m.source, m.ctx = s, ctx
-		oldWarn(s, ctx, lg)
+		seams{warnCerts: prevWarn}.orDefault().warnCerts(s, ctx, lg)
 	}
-	newServer = func(cc listener.Config, h http.Handler) (*listener.Server, error) {
+	sm.newServer = func(cc listener.Config, h http.Handler) (*listener.Server, error) {
 		m.get = cc.TLS.GetCertificate
-		return oldServer(cc, h)
+		return seams{newServer: prevServer}.orDefault().newServer(cc, h)
 	}
 	if o.viaServe {
 		m.r = launchViaServe(t, cfg, c, p, o.setup)
@@ -1629,10 +1664,15 @@ func status(t *testing.T, url, host string) int {
 // So the start reads no file again.
 func TestTS27_StartStaticOnly(t *testing.T) {
 	var news, starts atomic.Int32
-	oldNew, oldStart := newACME, startACME
-	t.Cleanup(func() { newACME, startACME = oldNew, oldStart })
-	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { news.Add(1); return oldNew(ap) }
-	startACME = func(ctx context.Context, a *listener.ACME) error { starts.Add(1); return oldStart(ctx, a) }
+	sm := seamsOf(t)
+	sm.newACME = func(ap listener.ACMEParams) (*listener.ACME, error) {
+		news.Add(1)
+		return seams{}.orDefault().newACME(ap)
+	}
+	sm.startACME = func(ctx context.Context, a *listener.ACME) error {
+		starts.Add(1)
+		return seams{}.orDefault().startACME(ctx, a)
+	}
 	m := startMixed(t, mixOpt{remove: true})
 	if news.Load() != 0 || starts.Load() != 0 {
 		t.Errorf("newACME calls %d, startACME calls %d, want 0 and 0", news.Load(), starts.Load())
@@ -1684,9 +1724,10 @@ func TestTS27_StartClientParams(t *testing.T) {
 	for _, o := range []mixOpt{{acme: true, seed: true, root: true, private: `"10.0.0.0/8", "192.168.0.0/16"`}, {acme: true, seed: true}} {
 		t.Run(fmt.Sprintf("root %v private %q", o.root, o.private), func(t *testing.T) {
 			var got listener.ACMEParams
-			oldNew := newACME
-			t.Cleanup(func() { newACME = oldNew })
-			newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return oldNew(ap) }
+			seamsOf(t).newACME = func(ap listener.ACMEParams) (*listener.ACME, error) {
+				got = ap
+				return seams{}.orDefault().newACME(ap)
+			}
 			m := startMixed(t, o)
 			if (got.CARoots != nil) != o.root {
 				t.Errorf("CARoots nil = %v, want %v", got.CARoots == nil, !o.root)
@@ -1705,9 +1746,7 @@ func TestTS27_StartClientParams(t *testing.T) {
 // acme.names entries, in order. The list in the test is literal (T-S-27).
 func TestTS27_StartClientNames(t *testing.T) {
 	var got listener.ACMEParams
-	oldNew := newACME
-	t.Cleanup(func() { newACME = oldNew })
-	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return nil, errors.New("test error") }
+	seamsOf(t).newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return nil, errors.New("test error") }
 	startMixed(t, mixOpt{acme: true, name: "k1.host.zz, k2.host.zz, k3.host.zz"})
 	if want := []string{"k1.host.zz", "k2.host.zz", "k3.host.zz"}; !slices.Equal(got.Names, want) {
 		t.Errorf("Names given to NewACME = %q, want %q", got.Names, want)
@@ -1742,9 +1781,7 @@ func TestTS27_NormalName(t *testing.T) {
 // The source refuses them: the error is not errNoClient, and it counts each.
 // That holds for a name with a byte of 0x80 or more: U+212A is no "k".
 func TestTS27_StartClientAbsent(t *testing.T) {
-	oldNew := newACME
-	t.Cleanup(func() { newACME = oldNew })
-	newACME = func(listener.ACMEParams) (*listener.ACME, error) { return nil, errors.New("test error") }
+	seamsOf(t).newACME = func(listener.ACMEParams) (*listener.ACME, error) { return nil, errors.New("test error") }
 	const acmeName = "kdecoy.host.zz"
 	m := startMixed(t, mixOpt{acme: true, name: acmeName})
 	for _, name := range []string{acmeName, "KDECOY.host.zz", acmeName + ".", "Kdecoy.Host.ZZ."} {
@@ -1770,9 +1807,10 @@ func TestTS27_StartClientAbsent(t *testing.T) {
 // 1 allocation.
 func TestTS27_StartMixed(t *testing.T) {
 	var got listener.ACMEParams
-	oldNew := newACME
-	t.Cleanup(func() { newACME = oldNew })
-	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return oldNew(ap) }
+	seamsOf(t).newACME = func(ap listener.ACMEParams) (*listener.ACME, error) {
+		got = ap
+		return seams{}.orDefault().newACME(ap)
+	}
 	m := startMixed(t, mixOpt{acme: true, seed: true, root: true, remove: true})
 	if got.CARoots == nil {
 		t.Error("CARoots is nil: the start did not use the parsed roots")
@@ -1837,15 +1875,17 @@ func TestTS27_StartBadEntry(t *testing.T) {
 	var cache certmagic.Storage
 	var stops atomic.Int32
 	var closedAtStop bool
-	oldNew, oldStart, oldStop := newACME, startACME, stopACME
-	t.Cleanup(func() { newACME, startACME, stopACME = oldNew, oldStart, oldStop })
-	newACME = func(p listener.ACMEParams) (*listener.ACME, error) { cache = p.Storage; return oldNew(p) }
-	startACME = func(context.Context, *listener.ACME) error { return nil }
-	stopACME = func(a *listener.ACME) { stops.Add(1); closedAtStop = q.Closed(); a.Stop() }
+	sm := seamsOf(t)
+	sm.newACME = func(p listener.ACMEParams) (*listener.ACME, error) {
+		cache = p.Storage
+		return seams{}.orDefault().newACME(p)
+	}
+	sm.startACME = func(context.Context, *listener.ACME) error { return nil }
+	sm.stopACME = func(a *listener.ACME) { stops.Add(1); closedAtStop = q.Closed(); a.Stop() }
 	// A start that does not fail ends at the timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
-	if code := serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: c, p: tempState(t, cfg), d: depsWithQueue(&q), stdout: io.Discard, stderr: &stderr}); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
+	if code := serveWith(ctx, serveArgs{seams: *sm, stop: cancel, cfg: cfg, c: c, p: tempState(t, cfg), d: depsWithQueue(&q), stdout: io.Discard, stderr: &stderr}); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
 		t.Errorf("exit %d, stderr %q, want exit 1 and the fixed line", code, stderr.String())
 	}
 	if stops.Load() != 1 || closedAtStop || q == nil || !q.Closed() {
