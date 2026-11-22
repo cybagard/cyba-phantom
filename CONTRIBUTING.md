@@ -5,36 +5,29 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
 
 ## Getting changes in
 
-1. Sign every commit with `git commit -s`. This adds a `Signed-off-by`
-   trailer under the Developer Certificate of Origin (DCO) 1.1 (see
-   <https://developercertificate.org>). The `dco` check of CI tests the
-   sign-off and the commit identity of every commit in a pull request.
-   The check passes only for a commit with the maintainer noreply address
+1. Add a sign-off to every commit with `git commit -s`. This adds a
+   `Signed-off-by` trailer under the Developer Certificate of Origin
+   (DCO) 1.1 (see <https://developercertificate.org>). The `dco` check
+   of CI tests the sign-off and the commit identity of every commit in
+   a pull request. The check passes only for a commit with the
+   maintainer noreply address
    (`67512030+cybagard@users.noreply.github.com`) as author, committer
    and `Signed-off-by` address. An outside contributor never uses this
-   address (see the path for an outside contributor below). The committer
-   can also be the GitHub committer address, for a commit that GitHub
-   makes. For the check to pass, every address in any other trailer is
-   also the maintainer noreply address. The Claude co-author address is
-   allowed only on a `Co-authored-by` line for Claude, in a trailer or in
-   the text. On that line, the key starts at column 1 and ":" follows it
-   directly. The name is "Claude" or starts with "Claude ". The line has
-   no other address. The check also reads the whole commit message
-   (subject, body, every paragraph and line). The message may hold only
-   printable ASCII, TAB, line ends (LF, or CR before LF), and the
-   characters U+00A7, U+2014, U+2013, U+2026 and U+00B7. Each "@" in the
-   message must be one of four uses. It is inside the maintainer address.
-   It is inside the Claude address on a Claude co-author line. It starts a
-   mention: `@context`, `@dependabot` or `@cybagard`, and no other name.
-   Or it comes before a version such as `x@v1.2.3` or
-   `actions/checkout@v5.1.0`. After a mention or a version, a "." and a
-   word fail the "@", also after spaces or one line break. A byte that is
-   not ASCII cannot follow the maintainer address, a mention or a version.
-   Any other "@" fails the check. The author name and the committer name
-   follow the same character list and hold no "@". The header comment of
-   `tools/dco/main.go` gives the full rules, with the forms that fail by
-   design and the known limits. It also covers the rule for the encoding
-   header. A commit that fails one of these rules fails the check.
+   address (see the path for an outside contributor below). Do these
+   steps for each commit of a pull request:
+   - Do not add a GPG or SSH signature (`git commit -S`, or the setting
+     `commit.gpgSign`). A commit with a signature fails the check.
+   - Do not make a commit on the GitHub web pages, for example a web
+     edit, a suggestion or "Update branch". GitHub adds a GPG signature
+     to such a commit, so it fails the check. Make the commit again
+     locally with `git commit -s`.
+   - Write the commit message in printable ASCII. Use "@" only in the
+     forms that the rule permits, for example a Claude co-author line.
+   The header comment of `tools/dco/main.go` is the only full statement
+   of the rule. It covers the sign-off, the addresses, the commit
+   message, the names and the commit object header. It also gives the
+   forms that fail by design and the known limits. A commit that breaks
+   the rule fails the check.
    An outside contributor forks, branches, commits with `git commit -s`,
    and opens a pull request. An outside contributor commits with their
    own name and address, never with the maintainer address. The `dco`
