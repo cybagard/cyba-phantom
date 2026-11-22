@@ -480,8 +480,8 @@ type relabeledVerifier struct {
 func (r relabeledVerifier) Name() string    { return r.name }
 func (r relabeledVerifier) KeyHash() uint32 { return r.hash }
 
-// relabeled returns a signer and a verifier of the key s with the name and the
-// key hash that the caller gives.
+// relabeled wraps the key s in a signer and a verifier with the given name and
+// key hash.
 func relabeled(t testing.TB, s note.Signer, text, name string, hash uint32) (note.Signer, note.Verifier) {
 	t.Helper()
 	v, err := ParseKey([]byte(text))
