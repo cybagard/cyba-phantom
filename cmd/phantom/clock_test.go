@@ -91,10 +91,10 @@ func TestTU30_ServeStartsTheClockBeforeAnyAccept(t *testing.T) {
 	var accepts, atClock atomic.Int64
 	var keyAtClock atomic.Value
 	atClock.Store(-1)
-	old := listen
-	t.Cleanup(func() { listen = old })
-	listen = func(network, addr string) (net.Listener, error) {
-		l, err := old(network, addr)
+	sm := seamsOf(t)
+	prev := sm.listen
+	sm.listen = func(network, addr string) (net.Listener, error) {
+		l, err := seams{listen: prev}.orDefault().listen(network, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -211,7 +211,7 @@ func TestTU30_ClockRefusalStopsTheStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
 	var stderr syncBuf
-	code := serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
+	code := serveWith(ctx, serveArgs{seams: *seamsOf(t), stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
 	if code != 1 || !strings.Contains(stderr.String(), clockLine) || strings.Contains(stderr.String(), "retention cap") {
 		t.Errorf("exit %d, stderr %q; want exit 1 and the clock line", code, stderr.String())
 	}
@@ -252,7 +252,7 @@ func TestTU30_BootIDRefusesTheStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
 	var stderr syncBuf
-	code := serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
+	code := serveWith(ctx, serveArgs{seams: *seamsOf(t), stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
 	if code != 1 || !strings.Contains(stderr.String(), clockLine) {
 		t.Errorf("exit %d, stderr %q; want exit 1 and the clock line", code, stderr.String())
 	}

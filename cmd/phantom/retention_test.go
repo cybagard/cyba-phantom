@@ -88,7 +88,7 @@ func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), netWait)
 			defer cancel()
 			var stderr strings.Builder
-			code := serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
+			code := serveWith(ctx, serveArgs{seams: *seamsOf(t), stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
 			if code != 1 || !strings.Contains(stderr.String(), "phantom: retention cap does not start\n") {
 				t.Errorf("exit %d, stderr %q; want exit 1 and the cap line", code, stderr.String())
 			}

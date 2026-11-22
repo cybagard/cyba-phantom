@@ -36,11 +36,11 @@ func shutdownServers(srv *listener.Server) {
 // abortStart closes the two listen sockets and then stops the certificate
 // client, closes the cache, and stops the store part. It skips the client and
 // the cache when they are nil. An early return of serveWith calls it.
-func abortStart(httpsLn, httpLn net.Listener, acme *listener.ACME, cache *listener.Store, s *storePart) {
+func abortStart(sm seams, httpsLn, httpLn net.Listener, acme *listener.ACME, cache *listener.Store, s *storePart) {
 	httpsLn.Close()
 	httpLn.Close()
 	if acme != nil {
-		stopACME(acme)
+		sm.stopACME(acme)
 	}
 	if cache != nil {
 		cache.Close()
@@ -70,7 +70,7 @@ func serveNames(cfg *config.Config, c content) (names, decoys []string, acmeName
 // client, and the fixed line of the first failure, or "". The client is nil
 // when it does not exist. The cache is what listener.Open returned, or nil
 // when Open did not run.
-func startCerts(ctx context.Context, cfg *config.Config, c content, p startParams, s *storePart, names []string, httpsLn net.Listener, stderr io.Writer) (cache *listener.Store, acme *listener.ACME, line string) {
+func startCerts(ctx context.Context, sm seams, cfg *config.Config, c content, p startParams, s *storePart, names []string, httpsLn net.Listener, stderr io.Writer) (cache *listener.Store, acme *listener.ACME, line string) {
 	const clientLine = "phantom: certificate client does not start"
 	if s.root == nil {
 		return nil, nil, "phantom: state directory does not open"
@@ -86,7 +86,7 @@ func startCerts(ctx context.Context, cfg *config.Config, c content, p startParam
 		return cache, nil, clientLine
 	}
 	addr := httpsLn.Addr().(*net.TCPAddr)
-	acme, err = newACME(listener.ACMEParams{
+	acme, err = sm.newACME(listener.ACMEParams{
 		Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
 		Host: solverHost(addr), Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
 		CARoots: c.roots, CAPrivate: cfg.PrivateList("acme.ca_private"),
@@ -94,7 +94,7 @@ func startCerts(ctx context.Context, cfg *config.Config, c content, p startParam
 	if err != nil {
 		return cache, nil, clientLine
 	}
-	if startACME(ctx, acme) != nil {
+	if sm.startACME(ctx, acme) != nil {
 		// The client serves the cached certificates.
 		return cache, acme, clientLine
 	}
@@ -123,13 +123,13 @@ func startLine(s *storePart, b *bundlePart, noAES bool, certLine string, acmeSet
 	return line
 }
 
-// clientStop gives the step that calls stopACME for the client. It gives nil
-// when the client does not exist.
-func clientStop(acme *listener.ACME) func() {
+// clientStop gives the step that calls the stopACME seam of sm for the client.
+// It gives nil when the client does not exist.
+func clientStop(sm seams, acme *listener.ACME) func() {
 	if acme == nil {
 		return nil
 	}
-	return func() { stopACME(acme) }
+	return func() { sm.stopACME(acme) }
 }
 
 // closeBounded stops the certificate client, closes the cache, and stops the
