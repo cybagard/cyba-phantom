@@ -1,10 +1,10 @@
 {
-  "synced": "2026-11-19",
+  "synced": "2026-11-22",
   "files": {
     "01-prd.md": "d15cdcb13c243bf3c6db120cc0a38838f82dc7501aaa9717c6ca270de91dd784",
     "04-interfaces.md": "8eb3762e99cd6be9a253ab3b1bc1b7d96623805576fb0e49f1ccdecf4e1d8c42",
-    "07-test-plan.md": "1e5896be288ee36f5592a55593b5854b8d48f753049a6ceb1e3f221ea6d404fc",
-    "08-traceability.md": "7be8d73e7727109197b0922ce5518aa06d73f2b0c18ad52a93c72ec7be77fffd",
+    "07-test-plan.md": "feb2d652b9dfa2c98577f5fb67d14a4807951353ec541b8ddf45353a315bac5e",
+    "08-traceability.md": "9ad0bfb456bedd45f11c208636602562f73356c2461959fb7f5d4698e3f12f3c",
     "README.md": "59b9b908a15ff3f09c5bc4ba1688821de4f79df5dbee335ec82a3be56db42d82",
     "constitution-table.md": "e50c6e461a1ac26de14c82a21508dcf6ae64acaad1afd24fd288c0d1a43bbba3"
   }
