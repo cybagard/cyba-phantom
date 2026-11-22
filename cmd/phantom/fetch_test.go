@@ -282,6 +282,12 @@ func TestTU23_StopOrder(t *testing.T) {
 	awaitDone(t, g.r)
 	select {
 	case closed := <-f.ended:
+		f.mu.Lock()
+		captured := f.q != nil
+		f.mu.Unlock()
+		if !captured {
+			t.Error("the newServer seam of the test did not run: no queue was captured")
+		}
 		if closed {
 			t.Error("the queue was closed when the fetcher returned")
 		}
