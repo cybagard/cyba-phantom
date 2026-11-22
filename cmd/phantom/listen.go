@@ -68,8 +68,9 @@ var (
 )
 
 // serveArgs holds the values of serveWith, other than its context.
-// Set stop, cfg, stdout and stderr: serveWith does not check them for nil.
-// serveWith calls stop at the stop. A signal on hup asks for a bundle load.
+// Set stop, cfg, d, stdout and stderr. A zero value of one of them can
+// cause a panic. serveWith calls stop when ctx ends and when a serve call
+// fails. A signal on hup asks for a bundle load.
 type serveArgs struct {
 	stop           context.CancelFunc
 	hup            <-chan os.Signal
