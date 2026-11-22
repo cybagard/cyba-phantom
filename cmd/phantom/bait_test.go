@@ -150,9 +150,9 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	if o.refuse {
 		d.openStore = func(*os.Root, string, store.Options) (*sql.DB, error) { return nil, errors.New("test") }
 	}
-	oldNew := newServer
-	t.Cleanup(func() { newServer = oldNew })
-	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+	sm := seamsOf(t)
+	prevNew := sm.newServer
+	sm.newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
 		// No Serve call has run yet. If the start code calls the switch
 		// later, this response has a Set-Cookie. The test can miss a call
 		// from another goroutine.
@@ -162,7 +162,7 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 		h.ServeHTTP(rec, req)
 		hd := rec.Result().Header
 		s.probe = baitResp{rec.Code, rec.Body.String(), hd.Values("Set-Cookie"), hd}
-		return oldNew(c, h)
+		return seams{newServer: prevNew}.orDefault().newServer(c, h)
 	}
 	s.running = launchServe(t, cfg, s.p, d)
 	s.waitStarted(t)
