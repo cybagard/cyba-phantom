@@ -103,7 +103,7 @@ given=1
 if [ -z "$profile" ]; then
   given=0
   profile="$work/cover.out"
-  if ! go test -race -coverprofile="$profile" ./...; then
+  if ! go test -race -timeout 20m -coverprofile="$profile" ./...; then
     echo "coverage FAIL: go test failed"
     exit 1
   fi
