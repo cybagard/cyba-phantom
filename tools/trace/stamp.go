@@ -31,17 +31,24 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// dirHash is the result of hashDir.
+type dirHash struct {
+	hashes   map[string]string // file name to SHA-256
+	flagged  map[string]bool   // names that already have a finding
+	findings []string
+}
+
 // hashDir maps every regular file in dir (except manifest.json) to its
 // SHA-256. It reads dir, the resolved directory. Errors name specDir, the
 // typed argument. Subdirectories are findings: spec/ must be flat. A
 // non-nil error means the directory itself is unreadable.
-func hashDir(dir, specDir string) (map[string]string, map[string]bool, []string, error) {
+func hashDir(dir, specDir string) (dirHash, error) {
 	hashes := map[string]string{}
-	flagged := map[string]bool{} // names that already have a finding
+	flagged := map[string]bool{}
 	var findings []string
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("cannot read spec dir %q%s", specDir, errCause(err))
+		return dirHash{}, fmt.Errorf("cannot read spec dir %q%s", specDir, errCause(err))
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -68,7 +75,7 @@ func hashDir(dir, specDir string) (map[string]string, map[string]bool, []string,
 		}
 		hashes[e.Name()] = sha256Hex(data)
 	}
-	return hashes, flagged, findings, nil
+	return dirHash{hashes, flagged, findings}, nil
 }
 
 // runStamp verifies (or, with write, rotates) the sync stamp. It returns
@@ -78,10 +85,11 @@ func runStamp(specDir string, write bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	hashes, flagged, findings, err := hashDir(dir, specDir)
+	res, err := hashDir(dir, specDir)
 	if err != nil {
 		return nil, err
 	}
+	hashes, flagged, findings := res.hashes, res.flagged, res.findings
 	if write {
 		m := manifest{
 			Synced: time.Now().UTC().Format("2006-01-02"),

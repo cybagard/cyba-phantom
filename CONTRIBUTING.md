@@ -129,13 +129,47 @@ pinned toolchain as CI:
 ```sh
 docker build -t cyba-phantom-dev -f .devcontainer/Dockerfile \
   --build-arg VULNDB_FETCHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .devcontainer
-docker run --rm -v "$PWD":/src -w /src cyba-phantom-dev make all
+docker run --rm -e GOPROXY=https://proxy.golang.org -v "$PWD":/src:ro \
+  -v cyba-phantom-modules:/go/pkg/mod -w /src cyba-phantom-dev \
+  sh -c "go mod download && go mod tidy -diff && go mod verify"
+docker run --rm --init --network=none -v "$PWD":/src \
+  -v cyba-phantom-modules:/go/pkg/mod:ro -w /src cyba-phantom-dev \
+  sh -c "go mod verify && make all"
 ```
 
+The first `docker run` has network. It fills the volume `cyba-phantom-modules`
+with the Go modules, from the module proxy only. It runs three go commands.
+`go mod download` and `go mod tidy -diff` are both needed: `go mod download`
+does not fetch the modules that `go mod tidy -diff` needs for the tests of the
+dependencies. `go mod verify` checks the modules in the volume against their
+checksums. The second `docker run` has no network and mounts the volume
+read-only, so a test cannot change a module. It runs `go mod verify` again
+before `make all`, because another container can mount the volume with write
+access. Run the first `docker run` again after a change to `go.mod` or
+`go.sum`. Without it, a go command in the container fails with a network
+error. When `go mod verify` reports "dir has been modified", remove the volume
+with `docker volume rm cyba-phantom-modules`. Then run the first `docker run`
+again.
+
 (Or open the folder with the Dev Containers extension, which uses
-`.devcontainer/devcontainer.json`. To fetch a new vulnerability database
-copy there, rebuild the container without the build cache.) `make all` runs build, lint,
-`go mod tidy -diff`, the coverage gate and `make perf`. The coverage gate runs
+`.devcontainer/devcontainer.json`. The container has no network. Run the
+`docker build` line and the first `docker run` before you open the folder,
+because the extension mounts the same volume. The container mounts the volume
+read-only. Before you remove the volume, remove the dev container: Docker does
+not remove a volume that a container uses. To fetch a new vulnerability
+database copy there, rebuild the container without the build cache. The Dev
+Containers path was not tested end to end.)
+
+Two steps need the network: the module download and the fetch of the
+vulnerability database copy. Both run before the container starts. The first
+`docker run` fills the volume with the modules. The image build fetches the
+database copy, and `make check` reads it from the image. Each make target ran
+with the network cut and the volume read-only, and made no network request.
+Some targets need more setup, for example `make fill` and `make coldstart`
+(below).
+
+`make all` runs build, lint, `go mod tidy -diff`, the coverage gate and
+`make perf`. The coverage gate runs
 the tests with `-race`. Then `make all` runs the C10 trace check and the
 constitution-table mirror. The lint step needs the ref `origin/main`, or
 `BASE=<sha>`. `make all` does not run three checks of the ci workflow:

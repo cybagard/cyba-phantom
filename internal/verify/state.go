@@ -256,13 +256,17 @@ func (s *State) read() ([]byte, bool, error) {
 // or when the size of latest is larger than the size of the state. Else it
 // leaves the file as it is.
 //
-// The caller must read latest with ReadCheckpoint and the key of the state.
-// Update checks only the name of the key, not the key itself.
+// The caller must read latest with ReadCheckpoint or ParseCheckpoint and the
+// key of the state. Update checks the name and the key hash of the key, not
+// the key itself.
 //
 // Update parses no note. If the origin is not the name of the state key, it
-// gives ErrState and writes nothing. The zero value has such an origin. If the
-// size is 0 and the root is not the empty root, it gives ErrFork and writes
-// nothing.
+// gives ErrState and writes nothing. The zero value has an empty origin. A key
+// from ParseKey has a name, so Update refuses the zero value. If the key hash
+// is not the key hash of the state key, Update also gives ErrState and writes
+// nothing. This check also applies to two keys with equal names.
+// If the size is 0 and the root is not the empty root, it gives ErrFork and
+// writes nothing.
 //
 // The write uses a temporary file with mode 0600, Sync, and Rename. Before the
 // rename, Update reads the state file again. If the bytes differ, or the file
@@ -275,7 +279,7 @@ func (s *State) read() ([]byte, bool, error) {
 // Update then sets the state to the new checkpoint. It returns the change that
 // it made (StateFirstUse or StateUpdated) with ErrStateSync.
 func (s *State) Update(latest Checkpoint) (StateChange, error) {
-	if latest.origin != s.v.Name() {
+	if latest.origin != s.v.Name() || latest.keyHash != s.v.KeyHash() {
 		return 0, ErrState
 	}
 	if latest.size == 0 && latest.root != emptyRoot() {

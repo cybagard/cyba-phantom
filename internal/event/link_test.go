@@ -146,7 +146,7 @@ func TestTS32LinkEventStaysInMaxEventBytes(t *testing.T) {
 	st := int64(-maxInt)
 	in := Input{Kind: KindCallback, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
 		Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
-		Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+		Surface: SurfaceHeader, JA4: strings.Repeat("a", 128), H2: ctl, Hdr: ctl,
 		Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
 		ClientIP: "2001:db8:1234:5678:9abc:def0:1234:5678", BodyPrefix: make([]byte, 9000),
 		Link: linkValue()}
