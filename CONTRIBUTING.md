@@ -135,8 +135,8 @@ docker run --rm --init --network=none -v "$PWD":/src \
   -v cyba-phantom-gomod:/go/pkg/mod -w /src cyba-phantom-dev make all
 ```
 
-The first `docker run` has network. It fills
-the volume `cyba-phantom-gomod` with the Go modules. Both commands are needed:
+The first `docker run` has network. It fills the volume `cyba-phantom-gomod`
+with the Go modules. Both commands are needed:
 `go mod download` does not fetch the modules that `go mod tidy -diff` needs
 for the tests of the dependencies. The second `docker run` has no network
 and reads the modules from the volume. Run the first `docker run` again after
@@ -149,13 +149,14 @@ first `docker run` before you open the folder, because the extension mounts
 the same volume. To fetch a new vulnerability database copy there, rebuild
 the container without the build cache.)
 
-Two make targets need the network, and they run with the network cut. The
-module download reads the modules from the volume that the first `docker run`
-filled. The vulnerability database copy comes from the image build, and
-`make check` reads it from the image. No target loses its check.
+Two steps need the network: the module download and the fetch of the
+vulnerability database copy. Both run before the container starts. The first
+`docker run` fills the volume with the modules. The image build fetches the
+database copy, and `make check` reads it from the image. Thus each make target
+runs with the network cut, and no target loses its check.
 
-`make all` runs build, lint,
-`go mod tidy -diff`, the coverage gate and `make perf`. The coverage gate runs
+`make all` runs build, lint, `go mod tidy -diff`, the coverage gate and
+`make perf`. The coverage gate runs
 the tests with `-race`. Then `make all` runs the C10 trace check and the
 constitution-table mirror. The lint step needs the ref `origin/main`, or
 `BASE=<sha>`. `make all` does not run three checks of the ci workflow:
