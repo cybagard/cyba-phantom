@@ -496,14 +496,15 @@ func TestTS12_RequestContentCopied(t *testing.T) {
 	}
 }
 
-// inJA4Set is the oracle of the JA4 byte set. It does not call validJA4.
+// inJA4Set is the reference of the JA4 byte set. It does not call validJA4.
 func inJA4Set(b byte) bool {
 	return b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
 }
 
-// ja4Kinds has one base input and its record for each kind that can hold
-// fp.ja4. The base is valid when JA4 is valid. A refused event has a session id
-// made from its JA4 text.
+// ja4Kinds has one base input and its record for each of the 8 kinds that hold
+// fp.ja4. The base is valid when JA4 is valid. The retention kind refuses a
+// JA4, so it is not here. A refused event has a session id made from its JA4
+// text.
 var ja4Kinds = []struct {
 	name string
 	in   Input
@@ -511,12 +512,17 @@ var ja4Kinds = []struct {
 }{
 	{"request", Input{Kind: KindRequest}, Record{Kind: KindRequest}},
 	{"callback", Input{Kind: KindCallback}, Record{Kind: KindCallback}},
+	{"beacon", Input{Kind: KindBeacon}, Record{Kind: KindBeacon}},
+	{"score_change", Input{Kind: KindScoreChange}, Record{Kind: KindScoreChange}},
+	{"bundle_load", Input{Kind: KindBundleLoad}, Record{Kind: KindBundleLoad}},
+	{"bundle_rejected", Input{Kind: KindBundleRejected}, Record{Kind: KindBundleRejected}},
+	{"alert_sent", Input{Kind: KindAlertSent}, Record{Kind: KindAlertSent}},
 	{"refused", Input{Kind: KindRefused, Reason: ReasonBadHello, ClientIP: "192.0.2.7"},
 		Record{Kind: KindRefused, Detail: Detail{"reason": Str("bad_hello")}}},
 }
 
 // ja4Refused tests that NewEvent and Record.check both refuse the JA4 value v
-// with errJA4Bytes, for each kind. The control value "t13d" passes both.
+// with errJA4Bytes, for each kind.
 func ja4Refused(t *testing.T, name, v string) {
 	t.Helper()
 	for _, k := range ja4Kinds {
@@ -533,6 +539,7 @@ func ja4Refused(t *testing.T, name, v string) {
 
 // T-S-12: an fp.ja4 with a byte outside A-Z a-z 0-9 and _ is an error. Event
 // construction and the record check both refuse it. Neither path repairs it.
+// The control value "t13d" passes both paths for each kind.
 func TestTS12_JA4BytesRefused(t *testing.T) {
 	good := "t13d"
 	for _, k := range ja4Kinds {

@@ -347,8 +347,8 @@ func (r Record) check() error {
 			return errors.New("event: fp has no member")
 		}
 	}
-	// This test comes before the cap test, so that a long value with a bad
-	// byte gives errJA4Bytes.
+	// This test comes before checkText, so that each value with a bad byte
+	// gives errJA4Bytes.
 	if fp.JA4 != nil && !validJA4(*fp.JA4) {
 		return errJA4Bytes
 	}
