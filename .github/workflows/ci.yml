@@ -168,7 +168,9 @@ jobs:
 
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # internal/tlog and internal/store take 1.8x longer on some runners
+    # (tlog 210 s or 375 s, store 390 s or 575 s on the same code).
+    timeout-minutes: 30
     env:
       # The reader oracle needs GNU tar 1.35 and Python 3.13, which the
       # runner image does not have. The oracle job runs it.
