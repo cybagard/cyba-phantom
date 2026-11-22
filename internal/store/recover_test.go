@@ -543,27 +543,58 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 	}
 }
 
-// T-S-38: makeMarker gives the crash error after a crash at the file sync, the
-// close or the directory sync. The next makeMarker succeeds. The marker is
-// there.
+// testCrash is the panic value of a crash hook.
+type testCrash struct{}
+
+// crashAt sets a Step hook that panics with testCrash once, before the step.
+// It returns a function that is true when the hook ran. The panic stops the
+// call at once: no later step and no cleanup runs, as at a crash.
+func crashAt(t *testing.T, step string) (ran func() bool) {
+	t.Helper()
+	armed := true
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
+		if s == step && armed {
+			armed = false
+			panic(testCrash{})
+		}
+		return nil
+	}})
+	return func() bool { return !armed }
+}
+
+// crashes runs f. It fails t when f does not panic with testCrash.
+func crashes(t *testing.T, f func()) {
+	t.Helper()
+	defer func() {
+		switch r := recover(); r {
+		case nil:
+			t.Error("the call did not stop at the crash hook")
+		case testCrash{}:
+		default:
+			t.Errorf("the call panicked with another value: %v", r)
+		}
+	}()
+	f()
+}
+
+// T-S-38: makeMarker stops at a crash at the file sync, the close or the
+// directory sync. The marker file is there. The next makeMarker succeeds. A
+// descriptor that the panic leaves open stays open, as at a crash.
 func TestTS38CrashAtMarkerStepsLeavesAMarker(t *testing.T) {
 	for _, step := range []string{"sync", "close", "dirsync"} {
 		t.Run(step, func(t *testing.T) {
-			armed := true
-			safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
-				if s == step && armed {
-					armed = false
-					return safefiletest.Crash
-				}
-				return nil
-			}})
+			ran := crashAt(t, step)
 			root, err := os.OpenRoot(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer root.Close()
-			if err := makeMarker(root); !errors.Is(err, safefiletest.Crash) || armed {
-				t.Fatalf("makeMarker gave %v, the crash hook still armed %v", err, armed)
+			crashes(t, func() { makeMarker(root) })
+			if !ran() {
+				t.Fatal("the crash hook did not run")
+			}
+			if fi, err := root.Lstat(markerName); err != nil || fi.Size() != 0 {
+				t.Fatalf("the marker is not there after the crash: %v, %v", fi, err)
 			}
 			if err := makeMarker(root); err != nil {
 				t.Fatalf("the next makeMarker gave %v", err)

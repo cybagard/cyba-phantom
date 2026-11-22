@@ -177,32 +177,29 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 	}
 }
 
-// T-S-38: Open fails after a crash at the file sync or the directory sync of
-// a new database. The next Open makes the database. No temporary file stays.
-// Open cleans up after the error. The kill test shows the state of a start
-// that stops with no cleanup.
+// T-S-38: Open stops at a crash at the file sync or the directory sync of a
+// new database. The panic skips the cleanup. At "sync" the temporary file is
+// there and the real name is absent. At "dirsync" the real name is there. The
+// next Open succeeds and no temporary file stays. A descriptor that the panic
+// leaves open stays open, as at a crash.
 func TestTS38CrashAtDatabaseWritesLeavesNoTemporaryFile(t *testing.T) {
-	for _, step := range []string{"sync", "dirsync"} {
-		t.Run(step, func(t *testing.T) {
+	for _, c := range []struct {
+		step    string
+		renamed bool // the crash is after the rename
+	}{{"sync", false}, {"dirsync", true}} {
+		t.Run(c.step, func(t *testing.T) {
 			root, state, _ := newState(t)
 			file := filepath.Join(state, "events.db")
-			armed := true
-			safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
-				if s == step && armed {
-					armed = false
-					return safefiletest.Crash
-				}
-				return nil
-			}})
-			db, err := Open(root, "events.db", Options{})
-			if db != nil {
-				db.Close()
-			}
-			if armed {
+			ran := crashAt(t, c.step)
+			crashes(t, func() { Open(root, "events.db", Options{}) })
+			if !ran() {
 				t.Fatal("the crash hook did not run")
 			}
-			wantRule(t, err, "events.db", ruleCreate)
-			db = mustOpen(t, root, "events.db")
+			if gone(file) == c.renamed || gone(file+tempSuffix) != c.renamed {
+				t.Fatalf("after the crash: real name gone %v, temporary gone %v; want %v, %v",
+					gone(file), gone(file+tempSuffix), !c.renamed, c.renamed)
+			}
+			db := mustOpen(t, root, "events.db")
 			defer db.Close()
 			if err := Migrate(db, "origin"); err != nil {
 				t.Fatal(err)
