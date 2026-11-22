@@ -129,12 +129,32 @@ pinned toolchain as CI:
 ```sh
 docker build -t cyba-phantom-dev -f .devcontainer/Dockerfile \
   --build-arg VULNDB_FETCHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .devcontainer
-docker run --rm -v "$PWD":/src -w /src cyba-phantom-dev make all
+docker run --rm -v "$PWD":/src:ro -v cyba-phantom-gomod:/go/pkg/mod -w /src \
+  cyba-phantom-dev sh -c "go mod download && go mod tidy -diff"
+docker run --rm --init --network=none -v "$PWD":/src \
+  -v cyba-phantom-gomod:/go/pkg/mod -w /src cyba-phantom-dev make all
 ```
 
+The first `docker run` has network. It fills
+the volume `cyba-phantom-gomod` with the Go modules. Both commands are needed:
+`go mod download` does not fetch the modules that `go mod tidy -diff` needs
+for the tests of the dependencies. The second `docker run` has no network
+and reads the modules from the volume. Run the first `docker run` again after
+a change to `go.mod` or `go.sum`. Without it, a go command in the container
+fails with a network error.
+
 (Or open the folder with the Dev Containers extension, which uses
-`.devcontainer/devcontainer.json`. To fetch a new vulnerability database
-copy there, rebuild the container without the build cache.) `make all` runs build, lint,
+`.devcontainer/devcontainer.json`. The container has no network. Run the
+first `docker run` before you open the folder, because the extension mounts
+the same volume. To fetch a new vulnerability database copy there, rebuild
+the container without the build cache.)
+
+Two make targets need the network, and they run with the network cut. The
+module download reads the modules from the volume that the first `docker run`
+filled. The vulnerability database copy comes from the image build, and
+`make check` reads it from the image. No target loses its check.
+
+`make all` runs build, lint,
 `go mod tidy -diff`, the coverage gate and `make perf`. The coverage gate runs
 the tests with `-race`. Then `make all` runs the C10 trace check and the
 constitution-table mirror. The lint step needs the ref `origin/main`, or
