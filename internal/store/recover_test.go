@@ -543,33 +543,36 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 	}
 }
 
-// testCrash is the panic value of a crash hook.
-type testCrash struct{}
+// stopSignal is the panic value of a stop hook.
+type stopSignal struct{}
 
-// crashAt sets a Step hook that panics with testCrash once, before the step.
-// It returns a function that is true when the hook ran. The panic stops the
-// call at once: no later step and no cleanup runs, as at a crash.
-func crashAt(t *testing.T, step string) (ran func() bool) {
+// stopAt sets a Step hook that panics with stopSignal once, before the step.
+// It returns a function that is true when the hook ran. The callers of the
+// store do not stop at seam.Crash: newDatabase calls drop on each error of a
+// sync, and makeMarker closes the file after a failed sync. So the tests use a
+// panic. It stops the call with no file cleanup, but deferred calls still run.
+// One example is the deferred close of the directory in Open.
+func stopAt(t *testing.T, step string) (ran func() bool) {
 	t.Helper()
 	armed := true
 	safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
 		if s == step && armed {
 			armed = false
-			panic(testCrash{})
+			panic(stopSignal{})
 		}
 		return nil
 	}})
 	return func() bool { return !armed }
 }
 
-// crashes runs f. It fails t when f does not panic with testCrash.
-func crashes(t *testing.T, f func()) {
+// catchPanic runs f. It fails t when f does not panic with stopSignal.
+func catchPanic(t *testing.T, f func()) {
 	t.Helper()
 	defer func() {
 		switch r := recover(); r {
 		case nil:
-			t.Error("the call did not stop at the crash hook")
-		case testCrash{}:
+			t.Error("the call did not stop at the stop hook")
+		case stopSignal{}:
 		default:
 			t.Errorf("the call panicked with another value: %v", r)
 		}
@@ -577,24 +580,92 @@ func crashes(t *testing.T, f func()) {
 	f()
 }
 
-// T-S-38: makeMarker stops at a crash at the file sync, the close or the
-// directory sync. The marker file is there. The next makeMarker succeeds. A
-// descriptor that the panic leaves open stays open, as at a crash.
-func TestTS38CrashAtMarkerStepsLeavesAMarker(t *testing.T) {
-	for _, step := range []string{"sync", "close", "dirsync"} {
-		t.Run(step, func(t *testing.T) {
-			ran := crashAt(t, step)
+// T-I-07: a marker that exists is a success, followed by the directory sync.
+// No file sync and no close runs. If the directory sync fails, makeMarker
+// returns that error.
+func TestTI07MarkerThatExistsIsFollowedByTheDirectorySync(t *testing.T) {
+	errSync := errors.New("sync failed")
+	for _, c := range []struct {
+		name string
+		hook error // the error of the directory sync
+	}{{"directory sync passes", nil}, {"directory sync fails", errSync}} {
+		t.Run(c.name, func(t *testing.T) {
 			root, err := os.OpenRoot(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer root.Close()
-			crashes(t, func() { makeMarker(root) })
+			if err := os.WriteFile(filepath.Join(root.Name(), markerName), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var dirs int
+			var others []string
+			safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+				if step != "dirsync" {
+					others = append(others, step)
+					return nil
+				}
+				dirs++
+				return c.hook
+			}})
+			err = makeMarker(root)
+			if dirs != 1 || len(others) != 0 {
+				t.Fatalf("directory syncs %d, other steps %q; want 1 and none", dirs, others)
+			}
+			if c.hook == nil && err != nil {
+				t.Fatalf("makeMarker gave %v, want nil", err)
+			}
+			if c.hook != nil && (!errors.Is(err, errSync) || !errors.Is(err, safefile.ErrDirSync)) {
+				t.Fatalf("makeMarker gave %v, want the directory sync error", err)
+			}
+		})
+	}
+}
+
+// T-I-07: the file sync and the close of a new marker both fail, with two
+// different errors. makeMarker keeps the first error, the one of the sync.
+func TestTI07MarkerKeepsTheSyncErrorWhenTheCloseFailsToo(t *testing.T) {
+	errSync, errClose := errors.New("sync failed"), errors.New("close failed")
+	var closes int
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+		switch step {
+		case "sync":
+			return errSync
+		case "close":
+			closes++
+			return errClose
+		}
+		return nil
+	}})
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	err = makeMarker(root)
+	if !errors.Is(err, errSync) || errors.Is(err, errClose) || closes != 1 {
+		t.Fatalf("makeMarker gave %v after %d closes, want the sync error only", err, closes)
+	}
+}
+
+// T-S-38: makeMarker stops at the file sync, the close or the directory sync.
+// The marker file is there. The next makeMarker succeeds. At "sync" the panic
+// leaves the marker descriptor open. At "close" CloseFile closes it.
+func TestTS38StopAtMarkerStepsLeavesAMarker(t *testing.T) {
+	for _, step := range []string{"sync", "close", "dirsync"} {
+		t.Run(step, func(t *testing.T) {
+			ran := stopAt(t, step)
+			root, err := os.OpenRoot(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			catchPanic(t, func() { makeMarker(root) })
 			if !ran() {
-				t.Fatal("the crash hook did not run")
+				t.Fatal("the stop hook did not run")
 			}
 			if fi, err := root.Lstat(markerName); err != nil || fi.Size() != 0 {
-				t.Fatalf("the marker is not there after the crash: %v, %v", fi, err)
+				t.Fatalf("the marker is not there after the stop: %v, %v", fi, err)
 			}
 			if err := makeMarker(root); err != nil {
 				t.Fatalf("the next makeMarker gave %v", err)

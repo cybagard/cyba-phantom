@@ -76,17 +76,23 @@ func gone(path string) bool {
 	return errors.Is(err, fs.ErrNotExist)
 }
 
-// stepHook gives a Step hook that runs f before the step. The step "sync" is
-// the file sync of the new database, "dirsync" is the sync of its directory.
-// The hook runs before the sync, not after it. At "sync" it is the last seam
-// call before the check of the real name and the rename.
-func stepHook(step string, f func()) func(string, string) error {
+// forStep gives a Step hook that calls f before each run of the step. The hook
+// gives the result of f. For other steps it gives nil.
+func forStep(step string, f func() error) func(string, string) error {
 	return func(s, _ string) error {
 		if s == step {
-			f()
+			return f()
 		}
 		return nil
 	}
+}
+
+// stepHook gives a Step hook that runs f before the step. The step "sync" is
+// the file sync of the new database. The step "dirsync" is the sync of its
+// directory. The hook runs before the sync, not after it. At "sync" it is the
+// last seam call before the check of the real name and the rename.
+func stepHook(step string, f func()) func(string, string) error {
+	return forStep(step, func() error { f(); return nil })
 }
 
 // onStep sets the Step hook so that f runs before the step.
@@ -98,12 +104,7 @@ func onStep(t *testing.T, step string, f func()) {
 // failStep sets the Step hook so that the step gives err.
 func failStep(t *testing.T, step string, err error) {
 	t.Helper()
-	safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
-		if s == step {
-			return err
-		}
-		return nil
-	}})
+	safefiletest.Set(t, safefiletest.Hooks{Step: forStep(step, func() error { return err })})
 }
 
 // T-S-15: a start that stops after the create, or after the first write, leaves
@@ -177,26 +178,50 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 	}
 }
 
-// T-S-38: Open stops at a crash at the file sync or the directory sync of a
-// new database. The panic skips the cleanup. At "sync" the temporary file is
-// there and the real name is absent. At "dirsync" the real name is there. The
-// next Open succeeds and no temporary file stays. A descriptor that the panic
-// leaves open stays open, as at a crash.
-func TestTS38CrashAtDatabaseWritesLeavesNoTemporaryFile(t *testing.T) {
+// T-S-15: for a nested store.path, Open syncs the directory that holds the
+// database, not the state directory. The Step hook gets the name "." for both.
+// So the hook at "sync" removes the read mode of the state directory. SyncDir
+// opens its directory before the "dirsync" hook runs. An open of the state
+// directory itself then fails with EACCES, and the path "data" still opens.
+func TestTS15NewDatabaseSyncsTheDirectoryOfANestedPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the mode of the state directory")
+	}
+	root, state, _ := newState(t)
+	must(t, os.Mkdir(filepath.Join(state, "data"), 0o700))
+	restore := func() { hook(t, os.Chmod(state, 0o700)) }
+	t.Cleanup(restore)
+	onStep(t, "sync", func() { hook(t, os.Chmod(state, 0o300)) })
+	db, err := Open(root, "data/events.db", Options{})
+	restore()
+	if db != nil {
+		db.Close()
+	}
+	if err != nil {
+		t.Fatalf("Open gave %v, want the sync of the directory data", err)
+	}
+}
+
+// T-S-38: Open stops at the file sync or the directory sync of a new database.
+// The test panic skips the cleanup of newDatabase. At "sync" the temporary
+// file is there and the real name is absent. At "dirsync" the real name is
+// there. The next Open succeeds and no temporary file stays. At "sync" the
+// panic leaves the descriptor of the temporary file open. Nothing closes it.
+func TestTS38StopAtDatabaseWritesLeavesNoTemporaryFile(t *testing.T) {
 	for _, c := range []struct {
 		step    string
-		renamed bool // the crash is after the rename
+		renamed bool // the stop is after the rename
 	}{{"sync", false}, {"dirsync", true}} {
 		t.Run(c.step, func(t *testing.T) {
 			root, state, _ := newState(t)
 			file := filepath.Join(state, "events.db")
-			ran := crashAt(t, c.step)
-			crashes(t, func() { Open(root, "events.db", Options{}) })
+			ran := stopAt(t, c.step)
+			catchPanic(t, func() { Open(root, "events.db", Options{}) })
 			if !ran() {
-				t.Fatal("the crash hook did not run")
+				t.Fatal("the stop hook did not run")
 			}
 			if gone(file) == c.renamed || gone(file+tempSuffix) != c.renamed {
-				t.Fatalf("after the crash: real name gone %v, temporary gone %v; want %v, %v",
+				t.Fatalf("after the stop: real name gone %v, temporary gone %v; want %v, %v",
 					gone(file), gone(file+tempSuffix), !c.renamed, c.renamed)
 			}
 			db := mustOpen(t, root, "events.db")
