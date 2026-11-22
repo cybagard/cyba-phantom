@@ -310,7 +310,8 @@ func checkText(name string, p *string, max int) error {
 }
 
 // validJA4 tests that s has only the bytes A-Z a-z 0-9 and _, the characters of
-// the JA4 form. An empty s is valid here: the callers test for empty.
+// the JA4 form. An empty s is valid here. NewEvent makes an empty JA4 absent.
+// The record check refuses a present empty fp.ja4 in checkText.
 func validJA4(s string) bool {
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
@@ -346,6 +347,11 @@ func (r Record) check() error {
 			return errors.New("event: fp has no member")
 		}
 	}
+	// This test comes before the cap test, so that a long value with a bad
+	// byte gives errJA4Bytes.
+	if fp.JA4 != nil && !validJA4(*fp.JA4) {
+		return errJA4Bytes
+	}
 	for _, c := range []struct {
 		name string
 		p    *string
@@ -359,9 +365,6 @@ func (r Record) check() error {
 		if err := checkText(c.name, c.p, c.max); err != nil {
 			return err
 		}
-	}
-	if fp.JA4 != nil && !validJA4(*fp.JA4) {
-		return errJA4Bytes
 	}
 	if r.Surface != nil {
 		switch *r.Surface {
@@ -714,7 +717,8 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	if err := detail.check(); err != nil {
 		return nil, err
 	}
-	// The JA4 text is read whole, also after byte capFP. It is never repaired.
+	// This code reads the whole JA4 text, also after byte capFP. It does not
+	// repair the text.
 	if !validJA4(in.JA4) {
 		return nil, errJA4Bytes
 	}

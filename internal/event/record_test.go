@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -490,22 +491,60 @@ func TestTS12_RequestContentCopied(t *testing.T) {
 	if n := strings.Count(string(b), m); n != 9 {
 		t.Errorf("marker is %d times in %s, want 9", n, b)
 	}
+	if !strings.Contains(string(b), `"ja4":"t13d"`) {
+		t.Errorf("no ja4 member with t13d in %s", b)
+	}
 }
 
-// ja4Refused tests that NewEvent and Record.check both refuse the JA4 value v.
+// inJA4Set is the oracle of the JA4 byte set. It does not call validJA4.
+func inJA4Set(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
+// ja4Kinds has one base input and its record for each kind that can hold
+// fp.ja4. The base is valid when JA4 is valid. A refused event has a session id
+// made from its JA4 text.
+var ja4Kinds = []struct {
+	name string
+	in   Input
+	rec  Record
+}{
+	{"request", Input{Kind: KindRequest}, Record{Kind: KindRequest}},
+	{"callback", Input{Kind: KindCallback}, Record{Kind: KindCallback}},
+	{"refused", Input{Kind: KindRefused, Reason: ReasonBadHello, ClientIP: "192.0.2.7"},
+		Record{Kind: KindRefused, Detail: Detail{"reason": Str("bad_hello")}}},
+}
+
+// ja4Refused tests that NewEvent and Record.check both refuse the JA4 value v
+// with errJA4Bytes, for each kind. The control value "t13d" passes both.
 func ja4Refused(t *testing.T, name, v string) {
 	t.Helper()
-	if e, err := NewEvent(fixedClock(1), Input{Kind: KindRequest, JA4: v}); err == nil || e != nil {
-		t.Errorf("%s: NewEvent gives %v, %v, want an error and no event", name, e, err)
-	}
-	if err := (Record{Kind: KindRequest, FP: &FP{JA4: &v}}).check(); err == nil {
-		t.Errorf("%s: the record check accepts it", name)
+	for _, k := range ja4Kinds {
+		in, rec := k.in, k.rec
+		in.JA4, rec.FP = v, &FP{JA4: &v}
+		if e, err := NewEvent(fixedClock(1), in); !errors.Is(err, errJA4Bytes) || e != nil {
+			t.Errorf("%s, %s: NewEvent gives %v, %v, want errJA4Bytes and no event", name, k.name, e, err)
+		}
+		if err := rec.check(); !errors.Is(err, errJA4Bytes) {
+			t.Errorf("%s, %s: the record check gives %v, want errJA4Bytes", name, k.name, err)
+		}
 	}
 }
 
-// T-S-12: an fp.ja4 with a byte outside A-Z a-z 0-9 and _ is an error. The
-// error is at event construction and in the record check. It is never repaired.
+// T-S-12: an fp.ja4 with a byte outside A-Z a-z 0-9 and _ is an error. Event
+// construction and the record check both refuse it. Neither path repairs it.
 func TestTS12_JA4BytesRefused(t *testing.T) {
+	good := "t13d"
+	for _, k := range ja4Kinds {
+		in, rec := k.in, k.rec
+		in.JA4, rec.FP = good, &FP{JA4: &good}
+		if _, err := NewEvent(fixedClock(1), in); err != nil {
+			t.Errorf("%s: control: NewEvent: %v", k.name, err)
+		}
+		if err := rec.check(); err != nil {
+			t.Errorf("%s: control: record check: %v", k.name, err)
+		}
+	}
 	ok := strings.Repeat("a", capFP)
 	for name, v := range map[string]string{
 		"NUL": "\x00", "space": " ", "hyphen": "-", "e acute": "é", "0xff": "\xff",
@@ -515,7 +554,7 @@ func TestTS12_JA4BytesRefused(t *testing.T) {
 		ja4Refused(t, name, v)
 	}
 	for c := range 256 {
-		if b := byte(c); b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' {
+		if inJA4Set(byte(c)) {
 			continue
 		}
 		ja4Refused(t, fmt.Sprintf("byte %#x alone", c), string([]byte{byte(c)}))
@@ -528,8 +567,8 @@ func TestTS12_JA4BytesRefused(t *testing.T) {
 func TestTS12_JA4BytesAccepted(t *testing.T) {
 	var all strings.Builder
 	for c := range 256 {
-		if b := byte(c); b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' {
-			all.WriteByte(b)
+		if inJA4Set(byte(c)) {
+			all.WriteByte(byte(c))
 		}
 	}
 	v := all.String()
