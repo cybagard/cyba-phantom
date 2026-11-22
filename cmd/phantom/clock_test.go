@@ -211,7 +211,7 @@ func TestTU30_ClockRefusalStopsTheStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
 	var stderr syncBuf
-	code := serveWith(ctx, cancel, nil, cfg, content{}, p, d, io.Discard, &stderr)
+	code := serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
 	if code != 1 || !strings.Contains(stderr.String(), clockLine) || strings.Contains(stderr.String(), "retention cap") {
 		t.Errorf("exit %d, stderr %q; want exit 1 and the clock line", code, stderr.String())
 	}
@@ -252,7 +252,7 @@ func TestTU30_BootIDRefusesTheStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
 	var stderr syncBuf
-	code := serveWith(ctx, cancel, nil, cfg, content{}, p, d, io.Discard, &stderr)
+	code := serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: content{}, p: p, d: d, stdout: io.Discard, stderr: &stderr})
 	if code != 1 || !strings.Contains(stderr.String(), clockLine) {
 		t.Errorf("exit %d, stderr %q; want exit 1 and the clock line", code, stderr.String())
 	}
