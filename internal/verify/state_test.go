@@ -458,6 +458,183 @@ func TestTS14_UpdateRefusesValue(t *testing.T) {
 	}
 }
 
+// relabeledSigner signs with a real key. It has the name and the key hash that
+// a test chooses.
+type relabeledSigner struct {
+	note.Signer
+	name string
+	hash uint32
+}
+
+func (r relabeledSigner) Name() string    { return r.name }
+func (r relabeledSigner) KeyHash() uint32 { return r.hash }
+
+// relabeledVerifier verifies with a real key. It has the name and the key hash
+// that a test chooses.
+type relabeledVerifier struct {
+	note.Verifier
+	name string
+	hash uint32
+}
+
+func (r relabeledVerifier) Name() string    { return r.name }
+func (r relabeledVerifier) KeyHash() uint32 { return r.hash }
+
+// relabeled wraps the key s in a signer and a verifier with the given name and
+// key hash.
+func relabeled(t testing.TB, s note.Signer, text, name string, hash uint32) (note.Signer, note.Verifier) {
+	t.Helper()
+	v, err := ParseKey([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relabeledSigner{s, name, hash}, relabeledVerifier{v, name, hash}
+}
+
+// otherKey is a signer and a verifier that are not key A. The name is the name
+// of key A.
+type otherKey struct {
+	label string
+	s     note.Signer
+	v     note.Verifier
+}
+
+// otherKeys returns three keys. Each has the name of key A and another key
+// hash. One is a real key. The two others have the key hash of A plus 1 and
+// minus 1.
+func otherKeys(t testing.TB, hashA uint32) []otherKey {
+	t.Helper()
+	sB, textB := newKey(t, origin)
+	vB, _ := ParseKey([]byte(textB))
+	sUp, vUp := relabeled(t, sB, textB, origin, hashA+1)
+	sDown, vDown := relabeled(t, sB, textB, origin, hashA-1)
+	return []otherKey{{"key B", sB, vB}, {"hash plus 1", sUp, vUp}, {"hash minus 1", sDown, vDown}}
+}
+
+// T-S-14: two checkpoints from two keys with one name are not one log. This
+// holds also when the sizes and the roots are equal, and when one size is 0.
+// Different sizes with a proof that verifies give ErrFork too.
+func TestTS14_ConsistencyKeyHash(t *testing.T) {
+	sA, textA := newKey(t, origin)
+	vA, _ := ParseKey([]byte(textA))
+	l, _ := realLog(t, 10)
+	cpOfA := func(size int64) Checkpoint { return checkpointOf(t, vA, checkpointAt(t, l, sA, size)) }
+	a0, a5, a10 := cpOfA(0), cpOfA(5), cpOfA(10)
+	proofs := []ConsistencyProof{consProof(t, l, 5, 10)}
+	wantErr(t, "key A with key A", Consistency(a5, a10, proofs), nil)
+	for _, k := range otherKeys(t, vA.KeyHash()) {
+		cpOfOther := func(size int64) Checkpoint { return checkpointOf(t, k.v, checkpointAt(t, l, k.s, size)) }
+		o0, o5, o10 := cpOfOther(0), cpOfOther(5), cpOfOther(10)
+		wantErr(t, k.label+": same size and root", Consistency(a10, o10, nil), ErrFork)
+		wantErr(t, k.label+": same size and root, reverse", Consistency(o10, a10, nil), ErrFork)
+		wantErr(t, k.label+": other size, proof verifies", Consistency(a5, o10, proofs), ErrFork)
+		wantErr(t, k.label+": other size, reverse", Consistency(o10, a5, proofs), ErrFork)
+		wantErr(t, k.label+": key A at 0, other at 10", Consistency(a0, o10, nil), ErrFork)
+		wantErr(t, k.label+": other at 0, key A at 10", Consistency(o0, a10, nil), ErrFork)
+		wantErr(t, k.label+": both at 0", Consistency(a0, o0, nil), ErrFork)
+		wantErr(t, k.label+" with "+k.label, Consistency(o5, o10, proofs), nil)
+	}
+}
+
+// T-S-14: take a value with another name and the key hash of key A. It is not
+// one log with a value of key A. Consistency gives ErrFork in both orders. This
+// holds at size 0 too.
+func TestTS14_ConsistencyOriginSameKeyHash(t *testing.T) {
+	sA, textA := newKey(t, origin)
+	vA, _ := ParseKey([]byte(textA))
+	sB, textB := newKey(t, origin+"-b")
+	sX, vX := relabeled(t, sB, textB, origin+"-b", vA.KeyHash())
+	l, _ := realLog(t, 10)
+	cpOfA := func(size int64) Checkpoint { return checkpointOf(t, vA, checkpointAt(t, l, sA, size)) }
+	cpOfX := func(size int64) Checkpoint { return checkpointOf(t, vX, checkpointAt(t, l, sX, size)) }
+	proofs := []ConsistencyProof{consProof(t, l, 5, 10)}
+	wantErr(t, "same size and root", Consistency(cpOfA(10), cpOfX(10), nil), ErrFork)
+	wantErr(t, "same size and root, reverse", Consistency(cpOfX(10), cpOfA(10), nil), ErrFork)
+	wantErr(t, "other size, proof verifies", Consistency(cpOfA(5), cpOfX(10), proofs), ErrFork)
+	wantErr(t, "other size, reverse", Consistency(cpOfX(10), cpOfA(5), proofs), ErrFork)
+	wantErr(t, "size 0", Consistency(cpOfA(0), cpOfX(10), nil), ErrFork)
+	wantErr(t, "size 0, reverse", Consistency(cpOfX(10), cpOfA(0), nil), ErrFork)
+	wantErr(t, "value with itself", Consistency(cpOfX(5), cpOfX(10), proofs), nil)
+}
+
+// refuseUpdates checks that Update gives ErrState for each size of other, and
+// writes nothing. It checks first use, and a state that holds noteA. The state
+// has the name of key vA.
+func refuseUpdates(t *testing.T, vA note.Verifier, noteA []byte, label string, other func(size int64) Checkpoint) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(dir, vA, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First use: no state file. The refusal makes no file.
+	empty := snapshot(t, dir)
+	for _, size := range []int64{10, 0} {
+		if got, err := st.Update(other(size)); got != 0 || err != ErrState {
+			t.Errorf("%s, first use, size %d: %v, %v, want 0 and ErrState", label, size, got, err)
+		}
+		if after := snapshot(t, dir); after != empty {
+			t.Errorf("%s, first use, size %d: the directory changed:\n%s", label, size, after)
+		}
+		if _, ok := st.Checkpoint(); ok {
+			t.Errorf("%s, first use, size %d: the object holds a state", label, size)
+		}
+	}
+	if _, err := st.Update(checkpointOf(t, vA, noteA)); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	// Load the state again, so that it comes from the file.
+	st, err = LoadState(dir, vA, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	before := snapshot(t, dir)
+	for _, size := range []int64{10, 5, 3, 0} {
+		if got, err := st.Update(other(size)); got != 0 || err != ErrState {
+			t.Errorf("%s, size %d: %v, %v, want 0 and ErrState", label, size, got, err)
+		}
+		if after := snapshot(t, dir); after != before {
+			t.Errorf("%s, size %d: the directory changed:\n%s\n%s", label, size, before, after)
+		}
+		if c, ok := st.Checkpoint(); !ok || !bytes.Equal(c.Note(), noteA) {
+			t.Errorf("%s, size %d: the object does not hold the old value", label, size)
+		}
+	}
+}
+
+// T-S-14: Update refuses a value from a key with the name of the state key and
+// another key hash. This holds for a larger, an equal, a smaller and a zero
+// size. It writes nothing, and the state in the object stays as it was.
+func TestTS14_UpdateKeyHash(t *testing.T) {
+	sA, textA := newKey(t, origin)
+	vA, _ := ParseKey([]byte(textA))
+	l, _ := realLog(t, 10)
+	noteA := checkpointAt(t, l, sA, 5)
+	for _, k := range otherKeys(t, vA.KeyHash()) {
+		refuseUpdates(t, vA, noteA, k.label, func(size int64) Checkpoint {
+			return checkpointOf(t, k.v, checkpointAt(t, l, k.s, size))
+		})
+	}
+}
+
+// T-S-14: Update refuses a value with another name and the key hash of the
+// state key, with ErrState. It writes nothing.
+func TestTS14_UpdateOriginSameKeyHash(t *testing.T) {
+	sA, textA := newKey(t, origin)
+	vA, _ := ParseKey([]byte(textA))
+	sB, textB := newKey(t, origin+"-b")
+	sX, vX := relabeled(t, sB, textB, origin+"-b", vA.KeyHash())
+	l, _ := realLog(t, 10)
+	refuseUpdates(t, vA, checkpointAt(t, l, sA, 5), "other name", func(size int64) Checkpoint {
+		return checkpointOf(t, vX, checkpointAt(t, l, sX, size))
+	})
+}
+
 // leftover makes a file in dir and returns its name.
 func leftover(t *testing.T, dir, name string) string {
 	t.Helper()
