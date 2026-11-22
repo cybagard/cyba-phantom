@@ -106,7 +106,8 @@ const (
 	SurfaceBody   Surface = "body"
 )
 
-// FP holds the fingerprint members of a session. A nil member is absent.
+// FP holds the fingerprint members of a session. A nil member is absent. The
+// ja4 member has only the bytes A-Z a-z 0-9 and _.
 type FP struct {
 	JA4 *string `json:"ja4,omitzero"`
 	H2  *string `json:"h2,omitzero"`
@@ -308,6 +309,21 @@ func checkText(name string, p *string, max int) error {
 	return nil
 }
 
+// validJA4 tests that s has only the bytes A-Z a-z 0-9 and _, the characters of
+// the JA4 form. An empty s is valid here: the callers test for empty.
+func validJA4(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+var errJA4Bytes = errors.New("event: fp.ja4 has a byte outside A-Z a-z 0-9 and _")
+
 // check tests the rules of the record before the record is encoded. Each cap
 // is tested here, and Detail.JSON tests the size of the detail text. Thus the
 // encoder gets at most MaxRecordBytes.
@@ -343,6 +359,9 @@ func (r Record) check() error {
 		if err := checkText(c.name, c.p, c.max); err != nil {
 			return err
 		}
+	}
+	if fp.JA4 != nil && !validJA4(*fp.JA4) {
+		return errJA4Bytes
 	}
 	if r.Surface != nil {
 		switch *r.Surface {
@@ -694,6 +713,10 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	}
 	if err := detail.check(); err != nil {
 		return nil, err
+	}
+	// The JA4 text is read whole, also after byte capFP. It is never repaired.
+	if !validJA4(in.JA4) {
+		return nil, errJA4Bytes
 	}
 	r := Record{
 		TS: now().UnixMilli(), Kind: in.Kind, Session: text(in.Session, capID, false),

@@ -21,7 +21,7 @@ import (
 
 // largestRecord is the length of the largest canonical record, as measured by
 // TestTS12_LargestEvent. That test builds the record.
-const largestRecord = 11428
+const largestRecord = 10788
 
 func sp(s string) *string { return &s }
 
@@ -234,7 +234,8 @@ func TestTS12_StringConstruction(t *testing.T) {
 			t.Errorf("%s: length %d", name, len(got))
 		}
 	}
-	e := mustEvent(t, Input{Kind: KindRequest, Vhost: long, Path: long, Surface: SurfaceBody, JA4: long})
+	e := mustEvent(t, Input{Kind: KindRequest, Vhost: long, Path: long, Surface: SurfaceBody,
+		JA4: strings.Repeat("a", 5000)})
 	if rec := e.Record(); len(*rec.Vhost) != 252 || len(*rec.Path) != 2048 || len(*rec.FP.JA4) != 128 {
 		t.Error("caps are not applied in the constructor")
 	}
@@ -481,13 +482,73 @@ func TestTS12_IPMarkers(t *testing.T) {
 func TestTS12_RequestContentCopied(t *testing.T) {
 	const m = "203.0.113.7"
 	e := mustEvent(t, Input{Kind: KindCallback, Session: m, Vhost: m, Method: m, Path: "/" + m, TrapID: m,
-		TokenID: m, JA4: m, H2: m, Hdr: m, Detail: Detail{"src": Str(m)}})
+		TokenID: m, JA4: "t13d", H2: m, Hdr: m, Detail: Detail{"src": Str(m)}})
 	b, err := e.record.canonical()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(b), m); n != 10 {
-		t.Errorf("marker is %d times in %s, want 10", n, b)
+	if n := strings.Count(string(b), m); n != 9 {
+		t.Errorf("marker is %d times in %s, want 9", n, b)
+	}
+}
+
+// ja4Refused tests that NewEvent and Record.check both refuse the JA4 value v.
+func ja4Refused(t *testing.T, name, v string) {
+	t.Helper()
+	if e, err := NewEvent(fixedClock(1), Input{Kind: KindRequest, JA4: v}); err == nil || e != nil {
+		t.Errorf("%s: NewEvent gives %v, %v, want an error and no event", name, e, err)
+	}
+	if err := (Record{Kind: KindRequest, FP: &FP{JA4: &v}}).check(); err == nil {
+		t.Errorf("%s: the record check accepts it", name)
+	}
+}
+
+// T-S-12: an fp.ja4 with a byte outside A-Z a-z 0-9 and _ is an error at event
+// construction and in the record check. It is never repaired.
+func TestTS12_JA4BytesRefused(t *testing.T) {
+	ok := strings.Repeat("a", capFP)
+	for name, v := range map[string]string{
+		"NUL": "\x00", "space": " ", "hyphen": "-", "e acute": "é", "0xff": "\xff",
+		"dot": "t13d.", "byte 129": ok + "-", "byte 129 NUL": ok + "\x00",
+		"byte 129 0xff": ok + "\xff",
+	} {
+		ja4Refused(t, name, v)
+	}
+	for c := range 256 {
+		if b := byte(c); b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' {
+			continue
+		}
+		ja4Refused(t, fmt.Sprintf("byte %#x alone", c), string([]byte{byte(c)}))
+		ja4Refused(t, fmt.Sprintf("byte %#x inside", c), "t13d"+string([]byte{byte(c)})+"h2")
+	}
+}
+
+// T-S-12: a value with each of A-Z a-z 0-9 and _ is accepted, and the record
+// holds the same bytes. The check allocates nothing.
+func TestTS12_JA4BytesAccepted(t *testing.T) {
+	var all strings.Builder
+	for c := range 256 {
+		if b := byte(c); b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' {
+			all.WriteByte(b)
+		}
+	}
+	v := all.String()
+	if len(v) != 63 {
+		t.Fatalf("the set has %d characters, want 63", len(v))
+	}
+	e, err := NewEvent(fixedClock(1), Input{Kind: KindRequest, JA4: v})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := e.Record(); rec.FP == nil || rec.FP.JA4 == nil || *rec.FP.JA4 != v {
+		t.Errorf("the record does not hold %q", v)
+	}
+	r := Record{Kind: KindRequest, FP: &FP{JA4: &v}}
+	if err := r.check(); err != nil {
+		t.Error(err)
+	}
+	if n := testing.AllocsPerRun(100, func() { _ = r.check() }); n != 0 {
+		t.Errorf("the record check makes %v allocations, want 0", n)
 	}
 }
 
@@ -689,7 +750,7 @@ func TestTS12_LargestEvent(t *testing.T) {
 	} {
 		e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
 			Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
-			Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+			Surface: SurfaceHeader, JA4: strings.Repeat("a", capFP), H2: ctl, Hdr: ctl,
 			Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
 			ClientIP: c.ip, BodyPrefix: make([]byte, 9000)})
 		if err != nil {
