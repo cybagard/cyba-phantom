@@ -4,9 +4,11 @@ package safefile
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -80,6 +82,19 @@ func TestTS38_WriteErrorDropsLinkPaths(t *testing.T) {
 	var got *os.LinkError
 	if errors.As(err, &got) {
 		t.Error("the cause is still a link error")
+	}
+}
+
+func TestTS38_WriteErrorKeepsNestedCause(t *testing.T) {
+	inner := &Error{Reason: ErrSymlink,
+		Cause: &fs.PathError{Op: "open", Path: secret, Err: syscall.ELOOP}}
+	err := writeFail(ErrCheck, fmt.Errorf("wrapped: %w", inner), false)
+	if !errors.Is(err, ErrSymlink) || !errors.Is(err, ErrCheck) {
+		t.Errorf("err = %v: ErrSymlink or ErrCheck not found", err)
+	}
+	var got *Error
+	if !errors.As(err, &got) || got != inner {
+		t.Error("the nested error was replaced")
 	}
 }
 
@@ -315,6 +330,7 @@ func TestTS38_SyncDirRefusals(t *testing.T) {
 		{"zero rule dot", r, ".", Rule{}, ErrRule},
 		{"file rule", r, "a", base, ErrRule},
 		{"file rule dot", r, ".", base, ErrRule},
+		{"bad bits dot", r, ".", Rule{Type: Dir, Owner: OwnerSelf, Forbid: fs.ModeDir}, ErrRule},
 		{"empty name", r, "", dirRule, ErrName},
 		{"parent name", r, "..", dirRule, ErrName},
 		{"absolute name", r, "/a", dirRule, ErrName},
@@ -443,5 +459,454 @@ func TestTS38_SyncDirOpenRootDirFails(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "/") {
 		t.Errorf("text %q holds a path", err.Error())
+	}
+}
+
+func TestTS38_SyncDirRootRule(t *testing.T) {
+	r, dir := root(t)
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	err := SyncDir(r, ".", dirRule)
+	if !errors.Is(err, ErrDirSync) || !errors.Is(err, ErrMode) {
+		t.Errorf("err = %v, want ErrDirSync with ErrMode", err)
+	}
+	if err := SyncDir(r, ".", Rule{Type: Dir, Owner: OwnerAny}); err != nil {
+		t.Errorf("a rule that the root meets: %v", err)
+	}
+}
+
+// The directory is swapped for a link after OpenRoot has checked it and
+// before the sync. A sync that opens the directory by path again fails or
+// syncs the wrong directory.
+func TestTS38_SyncDirDoesNotReopenByPath(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	other := filepath.Join(dir, "other")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	safefiletest.Set(t, safefiletest.Hooks{
+		// The owner check of the last part runs after its open.
+		OtherOwner: func(FileID) bool {
+			if calls++; calls == 2 {
+				b := filepath.Join(dir, "a", "b")
+				if err := os.Rename(b, filepath.Join(dir, "a", "moved")); err != nil {
+					t.Error(err)
+				}
+				if err := os.Symlink(other, b); err != nil {
+					t.Error(err)
+				}
+			}
+			return false
+		},
+	})
+	if err := SyncDir(r, "a/b", dirRule); err != nil {
+		t.Fatalf("SyncDir: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("owner checks = %d, want 2", calls)
+	}
+}
+
+var (
+	fixedRule  = WriteRule{Mode: 0o600, Temp: TempFixed, Dir: dirRule}
+	randomRule = WriteRule{Mode: 0o600, Temp: TempRandom, Prefix: ".tmp-", Dir: dirRule}
+)
+
+// privateRoot is root with the mode 0700, as dirRule needs.
+func privateRoot(t *testing.T) (*os.Root, string) {
+	t.Helper()
+	r, dir := root(t)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return r, dir
+}
+
+// names gives the sorted names in dir.
+func names(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name())
+	}
+	slices.Sort(out)
+	return out
+}
+
+func content(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "<" + err.Error() + ">"
+	}
+	return string(b)
+}
+
+func TestTS38_WriteRuleRefused(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	with := func(f func(*WriteRule)) WriteRule { w := fixedRule; f(&w); return w }
+	rules := map[string]WriteRule{
+		"zero":           {},
+		"no temp":        with(func(w *WriteRule) { w.Temp = 0 }),
+		"bad temp":       with(func(w *WriteRule) { w.Temp = 9 }),
+		"mode bits":      with(func(w *WriteRule) { w.Mode = fs.ModeSetuid | 0o600 }),
+		"mode type bits": with(func(w *WriteRule) { w.Mode = fs.ModeDir | 0o600 }),
+		"zero dir rule":  with(func(w *WriteRule) { w.Dir = Rule{} }),
+		"file dir rule":  with(func(w *WriteRule) { w.Dir = base }),
+		"fixed prefix":   with(func(w *WriteRule) { w.Prefix = ".tmp-" }),
+		"random no pref": with(func(w *WriteRule) { w.Temp = TempRandom }),
+		"random slash":   with(func(w *WriteRule) { w.Temp, w.Prefix = TempRandom, "a/b-" }),
+	}
+	check := func(label string, root *os.Root, name string, w WriteRule) {
+		t.Helper()
+		if _, err := WriteTemp(root, name, []byte("x"), w); !errors.Is(err, ErrRule) {
+			t.Errorf("%s: WriteTemp err = %v, want ErrRule", label, err)
+		}
+		if err := Replace(root, name, []byte("x"), w); !errors.Is(err, ErrRule) {
+			t.Errorf("%s: Replace err = %v, want ErrRule", label, err)
+		}
+	}
+	for label, w := range rules {
+		check(label, r, "f", w)
+	}
+	check("nil root", nil, "f", fixedRule)
+	for _, name := range []string{"", ".", "..", "/f", "a/../f", "a//f", "a/./f", "a/"} {
+		check("name "+name, r, name, fixedRule)
+	}
+	if got := names(t, dir); len(got) != 1 || got[0] != "a" {
+		t.Errorf("entries = %v, want only a", got)
+	}
+}
+
+func TestTS38_WriteTemp(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		for _, name := range []string{"f", "a/b/f"} {
+			tmp, err := WriteTemp(r, name, []byte("data"), w)
+			if err != nil {
+				t.Fatalf("WriteTemp %q: %v", name, err)
+			}
+			p := filepath.Join(dir, tmp)
+			fi, err := os.Lstat(p)
+			if err != nil || fi.Mode() != 0o600 || content(t, p) != "data" {
+				t.Errorf("temp %q: %v, %v, %q", tmp, fi, err, content(t, p))
+			}
+			if w.Temp == TempFixed && tmp != name+".tmp" {
+				t.Errorf("temp = %q, want %q", tmp, name+".tmp")
+			}
+			if w.Temp == TempRandom && (!strings.HasPrefix(filepath.Base(tmp), ".tmp-") ||
+				filepath.Dir(tmp) != filepath.Dir(name)) {
+				t.Errorf("temp = %q", tmp)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+				t.Errorf("WriteTemp made %q", name)
+			}
+		}
+	}
+}
+
+func TestTS38_ReplaceWritesAndReplaces(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	var seen []string
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
+		seen = append(seen, step+":"+name)
+		return nil
+	}})
+	w := fixedRule
+	w.Check = func() error { return nil }
+	for _, name := range []string{"f", "a/b/f"} {
+		for _, data := range []string{"one", "two"} {
+			if err := Replace(r, name, []byte(data), w); err != nil {
+				t.Fatalf("Replace %q: %v", name, err)
+			}
+			if got := content(t, filepath.Join(dir, name)); got != data {
+				t.Errorf("%q = %q, want %q", name, got, data)
+			}
+		}
+	}
+	want := "remove:f.tmp create:f.tmp write:f.tmp sync:f.tmp close:f.tmp check:f.tmp rename:f.tmp dirsync:."
+	if got := strings.Join(seen[:8], " "); got != want {
+		t.Errorf("steps = %q, want %q", got, want)
+	}
+	if last := seen[len(seen)-1]; last != "dirsync:a/b" {
+		t.Errorf("last step = %q, want dirsync:a/b", last)
+	}
+	if got := names(t, filepath.Join(dir, "a", "b")); !slices.Equal(got, []string{"c", "f"}) {
+		t.Errorf("entries = %v", got)
+	}
+	w.NoDirSync = true
+	seen = nil
+	if err := Replace(r, "f", []byte("three"), w); err != nil || strings.Contains(strings.Join(seen, " "), "dirsync") {
+		t.Errorf("NoDirSync: err = %v, steps = %v", err, seen)
+	}
+}
+
+func TestTS38_WriteAppliesRuleToRoot(t *testing.T) {
+	r, dir := root(t)
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if err := Replace(r, "f", []byte("x"), fixedRule); !errors.Is(err, ErrMode) {
+		t.Errorf("err = %v, want ErrMode", err)
+	}
+	if got := names(t, dir); len(got) != 0 {
+		t.Errorf("entries = %v, want none", got)
+	}
+}
+
+func TestTS38_ReplaceCrashMatrix(t *testing.T) {
+	steps := []string{"remove", "create", "write", "sync", "close", "check", "rename", "dirsync"}
+	for _, fixed := range []bool{true, false} {
+		for _, old := range []bool{true, false} {
+			for _, step := range steps {
+				if step == "remove" && !fixed {
+					continue
+				}
+				t.Run(fmt.Sprintf("fixed=%v/old=%v/%s", fixed, old, step), func(t *testing.T) {
+					r, dir := privateRoot(t)
+					w := randomRule
+					if fixed {
+						w = fixedRule
+						put(t, dir, "f.tmp", "stale")
+					}
+					w.Check = func() error { return nil }
+					if old {
+						put(t, dir, "f", "OLD")
+					}
+					armed, last := true, ""
+					safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
+						if armed {
+							last = s
+						}
+						if armed && s == step {
+							return safefiletest.Crash
+						}
+						return nil
+					}})
+					err := Replace(r, "f", []byte("new"), w)
+					if !errors.Is(err, safefiletest.Crash) || last != step {
+						t.Fatalf("err = %v, last step = %q", err, last)
+					}
+					_, statErr := os.Lstat(filepath.Join(dir, "f"))
+					got := content(t, filepath.Join(dir, "f"))
+					switch {
+					case step == "dirsync" && got != "new":
+						t.Errorf("final name = %q, want new", got)
+					case step != "dirsync" && old && got != "OLD":
+						t.Errorf("final name = %q, want OLD", got)
+					case step != "dirsync" && !old && !errors.Is(statErr, fs.ErrNotExist):
+						t.Errorf("final name = %q, want none", got)
+					}
+					if fixed && step == "remove" && content(t, filepath.Join(dir, "f.tmp")) != "stale" {
+						t.Error("a crash at the removal removed the old temporary file")
+					}
+					armed = false
+					if err := Replace(r, "f", []byte("again"), w); err != nil {
+						t.Fatalf("next Replace: %v", err)
+					}
+					if got := content(t, filepath.Join(dir, "f")); got != "again" {
+						t.Errorf("after the next call = %q", got)
+					}
+					if got := names(t, dir); fixed && !slices.Equal(got, []string{"f"}) {
+						t.Errorf("entries after the next call = %v, want f only", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestTS38_ReplaceStepFailure(t *testing.T) {
+	tests := []struct {
+		step    string
+		is      error
+		renamed bool // the new file can be in place
+	}{
+		{"remove", ErrTempRemove, false},
+		{"create", ErrCreate, false},
+		{"write", ErrWrite, false},
+		{"sync", ErrSync, false},
+		{"close", ErrClose, false},
+		{"check", ErrCheck, false},
+		{"rename", ErrRename, true},
+		{"dirsync", ErrDirSync, true},
+	}
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		w.Check = func() error { return nil }
+		for _, tc := range tests {
+			if tc.step == "remove" && w.Temp != TempFixed {
+				continue
+			}
+			t.Run(fmt.Sprintf("temp=%d/%s", w.Temp, tc.step), func(t *testing.T) {
+				r, dir := privateRoot(t)
+				put(t, dir, "f", "OLD")
+				safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
+					if s == tc.step {
+						return &fs.PathError{Op: "x", Path: secret, Err: syscall.EIO}
+					}
+					return nil
+				}})
+				err := Replace(r, "f", []byte("new"), w)
+				var we *WriteError
+				if !errors.As(err, &we) || we.Step != tc.is || !errors.Is(err, syscall.EIO) {
+					t.Fatalf("err = %v, want a *WriteError of %v with EIO", err, tc.is)
+				}
+				if errors.Is(err, ErrMayBeRenamed) != tc.renamed {
+					t.Errorf("matches ErrMayBeRenamed = %v, want %v", !tc.renamed, tc.renamed)
+				}
+				if strings.Contains(err.Error(), "secret") {
+					t.Error("the text holds the path")
+				}
+				want := "OLD"
+				if tc.step == "dirsync" {
+					want = "new"
+				}
+				if got := content(t, filepath.Join(dir, "f")); got != want {
+					t.Errorf("f = %q, want %q", got, want)
+				}
+				if got := names(t, dir); !slices.Equal(got, []string{"f"}) {
+					t.Errorf("entries = %v, want f only", got)
+				}
+			})
+		}
+	}
+}
+
+func TestTS38_ReplaceCheckFailureKeepsCause(t *testing.T) {
+	r, dir := privateRoot(t)
+	put(t, dir, "f", "OLD")
+	errCallback := errors.New("callback refused")
+	w := fixedRule
+	w.Check = func() error { return fmt.Errorf("verify: %w", errCallback) }
+	err := Replace(r, "f", []byte("new"), w)
+	if !errors.Is(err, ErrCheck) || !errors.Is(err, errCallback) || errors.Is(err, ErrMayBeRenamed) {
+		t.Errorf("err = %v", err)
+	}
+	if got := content(t, filepath.Join(dir, "f")); got != "OLD" {
+		t.Errorf("f = %q, want OLD", got)
+	}
+	if got := names(t, dir); !slices.Equal(got, []string{"f"}) {
+		t.Errorf("entries = %v, want f only", got)
+	}
+}
+
+func TestTS38_ReplaceRenameFailureRemovesTemp(t *testing.T) {
+	r, dir := privateRoot(t)
+	if err := os.MkdirAll(filepath.Join(dir, "f", "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := Replace(r, "f", []byte("new"), fixedRule)
+	if !errors.Is(err, ErrRename) || !errors.Is(err, ErrMayBeRenamed) {
+		t.Errorf("err = %v, want ErrRename with ErrMayBeRenamed", err)
+	}
+	if got := names(t, dir); !slices.Equal(got, []string{"f"}) {
+		t.Errorf("entries = %v, want f only", got)
+	}
+}
+
+func TestTS38_ReplaceCreateFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the mode")
+	}
+	r, dir := root(t)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	err := Replace(r, "f", []byte("new"), randomRule)
+	if !errors.Is(err, ErrCreate) || !errors.Is(err, syscall.EACCES) || errors.Is(err, ErrMayBeRenamed) {
+		t.Errorf("err = %v, want ErrCreate with EACCES", err)
+	}
+}
+
+func TestTS38_WriteDirLinkRefused(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	if err := os.Symlink("a", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"link/f", "link/b/f"} {
+		if err := Replace(r, name, []byte("x"), fixedRule); !errors.Is(err, ErrSymlink) {
+			t.Errorf("Replace %q: err = %v, want ErrSymlink", name, err)
+		}
+		if _, err := WriteTemp(r, name, []byte("x"), fixedRule); !errors.Is(err, ErrSymlink) {
+			t.Errorf("WriteTemp %q: err = %v, want ErrSymlink", name, err)
+		}
+	}
+	if got := names(t, filepath.Join(dir, "a")); !slices.Equal(got, []string{"b"}) {
+		t.Errorf("entries below the link target = %v", got)
+	}
+}
+
+func TestTS38_ReplaceNeverFollowsLinks(t *testing.T) {
+	for _, where := range []string{"temp", "final"} {
+		for _, outside := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/outside=%v", where, outside), func(t *testing.T) {
+				top := t.TempDir()
+				dir := filepath.Join(top, "root")
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				r, err := os.OpenRoot(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer r.Close()
+				target, linkTo := filepath.Join(dir, "target"), "target"
+				if outside {
+					target = filepath.Join(top, "outside")
+					linkTo = target
+				}
+				if err := os.WriteFile(target, []byte("TARGET"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				link := "f"
+				if where == "temp" {
+					link = "f.tmp"
+				}
+				if err := os.Symlink(linkTo, filepath.Join(dir, link)); err != nil {
+					t.Fatal(err)
+				}
+				if err := Replace(r, "f", []byte("new"), fixedRule); err != nil {
+					t.Fatalf("Replace: %v", err)
+				}
+				if got := content(t, target); got != "TARGET" {
+					t.Errorf("target = %q, want it unchanged", got)
+				}
+				fi, err := os.Lstat(filepath.Join(dir, "f"))
+				if err != nil || !fi.Mode().IsRegular() || content(t, filepath.Join(dir, "f")) != "new" {
+					t.Errorf("f: %v, %v", fi, err)
+				}
+			})
+		}
+	}
+}
+
+func TestTS38_WriteModeIsExactUnderUmask(t *testing.T) {
+	r, dir := privateRoot(t)
+	old := syscall.Umask(0o377)
+	defer syscall.Umask(old)
+	for _, mode := range []fs.FileMode{0o640, 0o666, 0o444, 0o755} {
+		w := fixedRule
+		w.Mode = mode
+		if err := Replace(r, "f", []byte("x"), w); err != nil {
+			t.Fatalf("Replace: %v", err)
+		}
+		fi, err := os.Stat(filepath.Join(dir, "f"))
+		if err != nil || fi.Mode().Perm() != mode {
+			t.Errorf("mode = %v, %v, want %v", fi.Mode(), err, mode)
+		}
 	}
 }

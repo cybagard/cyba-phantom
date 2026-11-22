@@ -3,9 +3,12 @@
 package safefile
 
 import (
+	"crypto/rand"
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
+	"syscall"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile/internal/seam"
 )
@@ -68,15 +71,14 @@ func (e *WriteError) Unwrap() []error {
 }
 
 // writeFail makes the error of a failed step. A path error and a link error
-// lose their paths.
+// lose their paths. Only the cause itself is looked at. An error that wraps
+// one keeps all that it wraps, so a refusal inside it still matches.
 func writeFail(step, cause error, after bool) error {
-	var pe *fs.PathError
-	var le *os.LinkError
-	switch {
-	case errors.As(cause, &pe):
-		cause = pe.Err
-	case errors.As(cause, &le):
-		cause = le.Err
+	switch e := cause.(type) {
+	case *fs.PathError:
+		cause = e.Err
+	case *os.LinkError:
+		cause = e.Err
 	}
 	return &WriteError{Step: step, Cause: cause, After: after}
 }
@@ -141,29 +143,211 @@ func syncRoot(d *os.Root, dir string) error {
 	return syncAndClose(hooks(), dir, f)
 }
 
+// dirRoot gives the directory dir below root, checked with the rule r, and the
+// function that releases it. The name "." is the root itself: the rule is run
+// on it, and releasing it does nothing. The caller releases the directory.
+func dirRoot(root *os.Root, dir string, r Rule) (*os.Root, func() error, error) {
+	if dir != "." {
+		sub, err := OpenRoot(root, dir, r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return sub, sub.Close, nil
+	}
+	fi, err := root.Stat(".")
+	if err != nil {
+		return nil, nil, fail(ErrExamine, err)
+	}
+	if err := checkOpen(fi, r, hooks()); err != nil {
+		return nil, nil, err
+	}
+	return root, func() error { return nil }, nil
+}
+
 // SyncDir opens dir below root with OpenRoot and the directory rule r, syncs
 // the directory and closes it. A link at any part of dir gives ErrSymlink, as
-// for OpenRoot. The name "." is the root itself. The caller opened it, so r is
-// not applied to it. Each error other than seam.Crash is a *WriteError with
-// the step ErrDirSync. It holds the refusal of OpenRoot, the sync error or the
-// close error as its cause. Each such error matches ErrMayBeRenamed, also when
-// no rename came before the call. A nil root, or a rule that is not a rule for
-// a directory, gives ErrRule. A Step hook that gives seam.Crash makes SyncDir
-// return that error.
+// for OpenRoot. The name "." is the root itself, and r is applied to it too.
+// Each error other than seam.Crash is a *WriteError with the step ErrDirSync.
+// It holds the refusal of OpenRoot, the sync error or the close error as its
+// cause. Each such error matches ErrMayBeRenamed, also when no rename came
+// before the call. A nil root, or a rule that is not a rule for a directory,
+// gives ErrRule. A Step hook that gives seam.Crash makes SyncDir return that
+// error.
 func SyncDir(root *os.Root, dir string, r Rule) error {
 	if root == nil || !r.valid() || r.Type != Dir {
 		return writeFail(ErrDirSync, fail(ErrRule, nil), true)
 	}
-	if dir == "." {
-		return syncRoot(root, dir)
-	}
-	sub, err := OpenRoot(root, dir, r)
+	d, release, err := dirRoot(root, dir, r)
 	if err != nil {
 		return writeFail(ErrDirSync, err, true)
 	}
-	err = syncRoot(sub, dir)
-	if cerr := sub.Close(); err == nil && cerr != nil {
+	err = syncRoot(d, dir)
+	if cerr := release(); err == nil && cerr != nil {
 		err = writeFail(ErrDirSync, cerr, true)
 	}
 	return err
+}
+
+// TempName is the rule for the name of the temporary file.
+type TempName uint8
+
+// The temporary names.
+const (
+	TempFixed  TempName = iota + 1 // "<name>.tmp"; an old one is removed first
+	TempRandom                     // Prefix and a random text
+)
+
+// WriteRule is the rule of one writer. The zero value is refused with ErrRule.
+type WriteRule struct {
+	Mode      fs.FileMode  // exact permission bits of the new file
+	Temp      TempName     // how the temporary file is named
+	Prefix    string       // TempRandom only: not empty, with no slash
+	NoDirSync bool         // Replace does not sync the directory
+	Dir       Rule         // the rule for the directory of the name
+	Check     func() error // runs after the file sync, before the rename
+}
+
+// valid is false for the zero rule and for each value that is not defined.
+func (w WriteRule) valid() bool {
+	if w.Mode&^fs.ModePerm != 0 || !w.Dir.valid() || w.Dir.Type != Dir {
+		return false
+	}
+	switch w.Temp {
+	case TempFixed:
+		return w.Prefix == ""
+	case TempRandom:
+		return w.Prefix != "" && !strings.Contains(w.Prefix, "/")
+	}
+	return false
+}
+
+// WriteTemp writes data to a new temporary file next to name. It syncs and
+// closes the file, and gives its name relative to root. The directory part of
+// name is opened with OpenRoot and w.Dir. A name with no directory part uses
+// root, checked with w.Dir too. Each file step uses a name in that open
+// directory, so a link is never followed. The file is made with O_EXCL and
+// O_NOFOLLOW. The mode is set with Chmod, so umask does not change it. A
+// failed step removes the temporary file. Each error is a *WriteError of its
+// step. An invalid rule, a nil root or a name that OpenRoot does not accept
+// gives ErrRule. seam.Crash returns at once, with no removal.
+func WriteTemp(root *os.Root, name string, data []byte, w WriteRule) (string, error) {
+	return write(root, name, data, w, false)
+}
+
+// Replace is WriteTemp, then w.Check when it is set, then the rename of the
+// temporary file over name. Then it syncs the open directory, unless
+// w.NoDirSync. A failure before the rename keeps the old file. An error that
+// matches ErrMayBeRenamed can leave the new file in place. ErrCheck holds the
+// error of w.Check as its cause.
+func Replace(root *os.Root, name string, data []byte, w WriteRule) error {
+	_, err := write(root, name, data, w, true)
+	return err
+}
+
+func write(root *os.Root, name string, data []byte, w WriteRule, replace bool) (string, error) {
+	ps, ok := parts(name)
+	if root == nil || !w.valid() || !ok {
+		return "", fail(ErrRule, nil)
+	}
+	dir := "."
+	if len(ps) > 1 {
+		dir = strings.Join(ps[:len(ps)-1], "/")
+	}
+	d, release, err := dirRoot(root, dir, w.Dir)
+	if err != nil {
+		return "", writeFail(ErrCreate, err, false)
+	}
+	defer release()
+	h := hooks()
+	tmp, err := stage(h, d, ps[len(ps)-1], data, w)
+	if err == nil && replace {
+		err = publish(h, d, dir, tmp, ps[len(ps)-1], w)
+	}
+	if err != nil {
+		return "", err
+	}
+	if dir != "." {
+		tmp = dir + "/" + tmp
+	}
+	return tmp, nil
+}
+
+// discard removes the temporary file after the failure err. It gives err, or
+// seam.Crash when a crash stops the removal. After a crash it removes nothing.
+func discard(h *seam.Hooks, d *os.Root, tmp string, err error) error {
+	if errors.Is(err, seam.Crash) {
+		return err
+	}
+	rerr := runStep(h, "remove", tmp, false, func() error { return d.Remove(tmp) })
+	if errors.Is(rerr, seam.Crash) {
+		return rerr
+	}
+	return err
+}
+
+// stage makes the synced and closed temporary file in d and gives its name.
+func stage(h *seam.Hooks, d *os.Root, base string, data []byte, w WriteRule) (string, error) {
+	tmp := w.Prefix
+	if w.Temp == TempFixed {
+		tmp = base + ".tmp"
+		err := runStep(h, "remove", tmp, false, func() error {
+			if err := d.Remove(tmp); !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+	} else {
+		tmp += rand.Text()
+	}
+	const flags = os.O_WRONLY | os.O_CREATE | os.O_EXCL | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+	var f *os.File
+	err := runStep(h, "create", tmp, false, func() (err error) {
+		if f, err = d.OpenFile(tmp, flags, 0o600); err != nil {
+			return err
+		}
+		return f.Chmod(w.Mode)
+	})
+	if err != nil && f == nil {
+		return "", err // nothing was made, so nothing is removed
+	}
+	closed := false
+	steps := []struct {
+		name string
+		fn   func() error
+	}{{"write", func() error { _, err := f.Write(data); return err }},
+		{"sync", func() error { return f.Sync() }},
+		{"close", func() error { closed = true; return f.Close() }}}
+	for _, s := range steps {
+		if err != nil {
+			break
+		}
+		err = runStep(h, s.name, tmp, false, s.fn)
+	}
+	if !closed { // a crash closes a descriptor too
+		_ = f.Close()
+	}
+	if err != nil {
+		return "", discard(h, d, tmp, err)
+	}
+	return tmp, nil
+}
+
+// publish runs the check, the rename and the directory sync of Replace.
+func publish(h *seam.Hooks, d *os.Root, dir, tmp, base string, w WriteRule) error {
+	if w.Check != nil {
+		if err := runStep(h, "check", tmp, false, w.Check); err != nil {
+			return discard(h, d, tmp, err)
+		}
+	}
+	err := runStep(h, "rename", tmp, false, func() error { return d.Rename(tmp, base) })
+	if err != nil {
+		return discard(h, d, tmp, err)
+	}
+	if w.NoDirSync {
+		return nil
+	}
+	return syncRoot(d, dir)
 }

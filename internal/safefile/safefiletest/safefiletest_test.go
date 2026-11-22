@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 // program calls the real Set in a binary that is not a test binary. A fake
@@ -37,6 +39,11 @@ func main() {
 	fmt.Printf("msg=%q cleanups=%d\n", f.msg, f.cleanups)
 }
 `
+
+// The program runs Set in another process, which the test cache cannot see.
+// This reference makes the test depend on package safefiletest, so a change to
+// Set runs the test again.
+var _ = safefiletest.Set
 
 func TestTS23_SetFailsOutsideTestBinary(t *testing.T) {
 	goTool, err := exec.LookPath("go")
