@@ -503,8 +503,8 @@ func ja4Refused(t *testing.T, name, v string) {
 	}
 }
 
-// T-S-12: an fp.ja4 with a byte outside A-Z a-z 0-9 and _ is an error at event
-// construction and in the record check. It is never repaired.
+// T-S-12: an fp.ja4 with a byte outside A-Z a-z 0-9 and _ is an error. The
+// error is at event construction and in the record check. It is never repaired.
 func TestTS12_JA4BytesRefused(t *testing.T) {
 	ok := strings.Repeat("a", capFP)
 	for name, v := range map[string]string{
