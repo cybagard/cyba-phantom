@@ -1162,3 +1162,459 @@ func TestTS38_WriteModeIsExactUnderUmask(t *testing.T) {
 		}
 	}
 }
+
+// stepLog records the steps of a write and fails none.
+func stepLog(t *testing.T) *[]string {
+	t.Helper()
+	var seen []string
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+		seen = append(seen, step)
+		return nil
+	}})
+	return &seen
+}
+
+func TestTS38_CreateNewWritesAndOrdersSteps(t *testing.T) {
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		for _, noSync := range []bool{false, true} {
+			t.Run(fmt.Sprintf("temp=%d/nosync=%v", w.Temp, noSync), func(t *testing.T) {
+				r, dir := privateRoot(t)
+				tree(t, dir)
+				seen := stepLog(t)
+				w.NoDirSync = noSync
+				for _, name := range []string{"f", "a/b/f"} {
+					*seen = nil
+					if err := CreateNew(r, name, []byte("data"), w); err != nil {
+						t.Fatalf("CreateNew %q: %v", name, err)
+					}
+					want := "create write sync close link remove dirsync"
+					if w.Temp == TempFixed {
+						want = "remove " + want
+					}
+					if noSync {
+						want = strings.TrimSuffix(want, " dirsync")
+					}
+					if got := strings.Join(*seen, " "); got != want {
+						t.Errorf("steps = %q, want %q", got, want)
+					}
+					p := filepath.Join(dir, name)
+					fi, err := os.Lstat(p)
+					if err != nil || content(t, p) != "data" {
+						t.Fatalf("%q: %v, %q", name, err, content(t, p))
+					}
+					if n := fi.Sys().(*syscall.Stat_t).Nlink; n != 1 {
+						t.Errorf("%q has %d links, want 1", name, n)
+					}
+					for _, n := range names(t, filepath.Dir(p)) {
+						if strings.HasSuffix(n, ".tmp") || strings.HasPrefix(n, ".tmp-") {
+							t.Errorf("temporary file %q stays", n)
+						}
+					}
+				}
+				if got := names(t, dir); !slices.Equal(got, []string{"a", "f"}) {
+					t.Errorf("entries = %v, want a and f", got)
+				}
+				if got := names(t, filepath.Join(dir, "a", "b")); !slices.Equal(got, []string{"c", "f"}) {
+					t.Errorf("entries below a/b = %v, want c and f", got)
+				}
+			})
+		}
+	}
+}
+
+func TestTS38_CreateNewRemoveBeforeDirSync(t *testing.T) {
+	r, _ := privateRoot(t)
+	seen := stepLog(t)
+	if err := CreateNew(r, "f", []byte("x"), randomRule); err != nil {
+		t.Fatal(err)
+	}
+	n := len(*seen)
+	if n < 2 || (*seen)[n-2] != "remove" || (*seen)[n-1] != "dirsync" {
+		t.Errorf("steps = %v, want remove, then dirsync last", *seen)
+	}
+}
+
+func TestTS38_CreateNewModeIsExactUnderUmask(t *testing.T) {
+	r, dir := privateRoot(t)
+	old := syscall.Umask(0o377)
+	defer syscall.Umask(old)
+	for _, mode := range []fs.FileMode{0o640, 0o666, 0o444, 0o755} {
+		w := fixedRule
+		w.Mode = mode
+		name := fmt.Sprintf("f%o", mode)
+		if err := CreateNew(r, name, []byte("x"), w); err != nil {
+			t.Fatalf("CreateNew: %v", err)
+		}
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil || fi.Mode().Perm() != mode {
+			t.Errorf("mode = %v, %v, want %v", fi.Mode(), err, mode)
+		}
+		if n := fi.Sys().(*syscall.Stat_t).Nlink; n != 1 {
+			t.Errorf("%s has %d links, want 1", name, n)
+		}
+	}
+}
+
+func TestTS38_CreateNewArgumentsRefused(t *testing.T) {
+	r, dir := privateRoot(t)
+	calls := 0
+	withCheck := fixedRule
+	withCheck.Check = func() error { calls++; return nil }
+	steps := stepLog(t)
+	tests := []struct {
+		label string
+		root  *os.Root
+		name  string
+		w     WriteRule
+		want  error
+	}{
+		{"nil root", nil, "f", fixedRule, ErrRule},
+		{"nil root and bad name", nil, "", fixedRule, ErrRule},
+		{"zero rule", r, "f", WriteRule{}, ErrRule},
+		{"bad rule and bad name", r, "", WriteRule{}, ErrRule},
+		{"check set", r, "f", withCheck, ErrRule},
+		{"check set and bad name", r, "", withCheck, ErrRule},
+		{"empty name", r, "", fixedRule, ErrName},
+		{"dot dot", r, "a/../f", fixedRule, ErrName},
+		{"absolute", r, "/f", fixedRule, ErrName},
+		{"trailing slash", r, "a/", fixedRule, ErrName},
+	}
+	for _, tc := range tests {
+		err := CreateNew(tc.root, tc.name, []byte("x"), tc.w)
+		var we *WriteError
+		var e *Error
+		if !errors.Is(err, tc.want) || errors.As(err, &we) || !errors.As(err, &e) {
+			t.Errorf("%s: err = %v, want *Error %v", tc.label, err, tc.want)
+		}
+	}
+	if calls != 0 || len(*steps) != 0 {
+		t.Errorf("Check calls = %d, steps = %v, want none", calls, *steps)
+	}
+	if got := names(t, dir); len(got) != 0 {
+		t.Errorf("entries = %v, want none", got)
+	}
+}
+
+// An entry is at the final name. CreateNew fails with ErrExist and changes
+// nothing: not the entry, not the target of a link.
+func TestTS38_CreateNewExistingName(t *testing.T) {
+	kinds := []string{"regular file", "symlink to a file outside", "symlink in root",
+		"dangling symlink", "directory"}
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		for _, kind := range kinds {
+			t.Run(fmt.Sprintf("temp=%d/%s", w.Temp, kind), func(t *testing.T) {
+				r, dir := privateRoot(t)
+				outside := filepath.Join(t.TempDir(), "outside")
+				target := filepath.Join(dir, "target")
+				put(t, dir, "target", "TARGET")
+				p := filepath.Join(dir, "f")
+				var err error
+				switch kind {
+				case "regular file":
+					put(t, dir, "f", "OLD")
+				case "symlink to a file outside":
+					target = outside
+					if err = os.WriteFile(outside, []byte("TARGET"), 0o600); err == nil {
+						err = os.Symlink(outside, p)
+					}
+				case "symlink in root":
+					err = os.Symlink("target", p)
+				case "dangling symlink":
+					target = outside
+					err = os.Symlink(outside, p)
+				case "directory":
+					err = os.Mkdir(p, 0o700)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				before := entryState(p)
+				entries := names(t, dir)
+				err = CreateNew(r, "f", []byte("new"), w)
+				var we *WriteError
+				if !errors.As(err, &we) || we.Step != ErrExist || we.After ||
+					we.Cause != syscall.EEXIST || !errors.Is(err, fs.ErrExist) {
+					t.Fatalf("err = %v, want a *WriteError of ErrExist with EEXIST", err)
+				}
+				if errors.Is(err, ErrLink) || errors.Is(err, ErrMayBeRenamed) {
+					t.Errorf("err = %v matches ErrLink or ErrMayBeRenamed", err)
+				}
+				if got := entryState(p); got != before {
+					t.Errorf("entry = %q, want %q", got, before)
+				}
+				if kind == "dangling symlink" {
+					if _, err := os.Lstat(outside); err == nil {
+						t.Error("the target of the dangling link was made")
+					}
+				} else if kind != "regular file" && kind != "directory" && content(t, target) != "TARGET" {
+					t.Errorf("target = %q, want it unchanged", content(t, target))
+				}
+				if got := names(t, dir); !slices.Equal(got, entries) {
+					t.Errorf("entries = %v, want %v", got, entries)
+				}
+			})
+		}
+	}
+}
+
+// A failed removal after the failed link is joined to the ErrExist error.
+func TestTS38_CreateNewExistingNameFailedRemovalIsJoined(t *testing.T) {
+	r, dir := privateRoot(t)
+	put(t, dir, "f", "OLD")
+	linked := false
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+		switch {
+		case step == "link":
+			linked = true
+		case step == "remove" && linked:
+			return syscall.EIO
+		}
+		return nil
+	}})
+	err := CreateNew(r, "f", []byte("new"), randomRule)
+	var we *WriteError
+	if !errors.As(err, &we) || we.Step != ErrExist || !errors.Is(err, ErrTempRemove) ||
+		!errors.Is(err, syscall.EIO) || !errors.Is(err, syscall.EEXIST) {
+		t.Errorf("err = %v, want ErrExist and ErrTempRemove with their causes", err)
+	}
+	if errors.Is(err, ErrMayBeRenamed) {
+		t.Error("err matches ErrMayBeRenamed")
+	}
+	if got := content(t, filepath.Join(dir, "f")); got != "OLD" {
+		t.Errorf("f = %q, want OLD", got)
+	}
+}
+
+func TestTS38_CreateNewOtherLinkFailure(t *testing.T) {
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		t.Run(fmt.Sprintf("temp=%d", w.Temp), func(t *testing.T) {
+			r, dir := privateRoot(t)
+			safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
+				if s == "link" {
+					return &os.LinkError{Op: "x", Old: secret, New: secret, Err: syscall.EIO}
+				}
+				return nil
+			}})
+			err := CreateNew(r, "f", []byte("new"), w)
+			var we *WriteError
+			if !errors.As(err, &we) || we.Step != ErrLink || we.After || !errors.Is(err, syscall.EIO) {
+				t.Fatalf("err = %v, want a *WriteError of ErrLink with EIO", err)
+			}
+			if !errors.Is(err, ErrMayBeRenamed) || errors.Is(err, ErrExist) {
+				t.Errorf("err = %v: ErrMayBeRenamed or ErrExist is wrong", err)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Error("the text holds the path")
+			}
+			if got := names(t, dir); len(got) != 0 {
+				t.Errorf("entries = %v, want none", got)
+			}
+		})
+	}
+}
+
+func TestTS38_CreateNewStepFailureBeforeLink(t *testing.T) {
+	tests := []struct {
+		step string
+		is   error
+	}{
+		{"remove", ErrTempRemove}, {"create", ErrCreate}, {"write", ErrWrite},
+		{"sync", ErrSync}, {"close", ErrClose},
+	}
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		for _, tc := range tests {
+			if tc.step == "remove" && w.Temp != TempFixed {
+				continue
+			}
+			t.Run(fmt.Sprintf("temp=%d/%s", w.Temp, tc.step), func(t *testing.T) {
+				r, dir := privateRoot(t)
+				safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
+					if s == tc.step {
+						return syscall.EIO
+					}
+					return nil
+				}})
+				err := CreateNew(r, "f", []byte("new"), w)
+				var we *WriteError
+				if !errors.As(err, &we) || we.Step != tc.is || !errors.Is(err, syscall.EIO) {
+					t.Fatalf("err = %v, want a *WriteError of %v with EIO", err, tc.is)
+				}
+				if errors.Is(err, ErrMayBeRenamed) {
+					t.Error("err matches ErrMayBeRenamed")
+				}
+				if got := names(t, dir); len(got) != 0 {
+					t.Errorf("entries = %v, want none", got)
+				}
+			})
+		}
+	}
+}
+
+// failAfterLink fails each listed step that comes after the link.
+func failAfterLink(t *testing.T, fail ...string) *[]string {
+	t.Helper()
+	var seen []string
+	linked := false
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+		seen = append(seen, step)
+		if step == "link" {
+			linked = true
+		}
+		if linked && slices.Contains(fail, step) {
+			return syscall.EIO
+		}
+		return nil
+	}})
+	return &seen
+}
+
+func TestTS38_CreateNewFailedRemovalAfterLink(t *testing.T) {
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		t.Run(fmt.Sprintf("temp=%d", w.Temp), func(t *testing.T) {
+			r, dir := privateRoot(t)
+			seen := failAfterLink(t, "remove")
+			err := CreateNew(r, "f", []byte("new"), w)
+			var we *WriteError
+			if !errors.As(err, &we) || we.Step != ErrTempRemove || !we.After || !errors.Is(err, syscall.EIO) {
+				t.Fatalf("err = %v, want a *WriteError of ErrTempRemove, After true", err)
+			}
+			if !errors.Is(err, ErrMayBeRenamed) {
+				t.Error("err does not match ErrMayBeRenamed")
+			}
+			if got := (*seen)[len(*seen)-1]; got != "dirsync" {
+				t.Errorf("last step = %q, want dirsync after the failed removal", got)
+			}
+			if got := content(t, filepath.Join(dir, "f")); got != "new" {
+				t.Errorf("f = %q, want new", got)
+			}
+			if got := names(t, dir); len(got) != 2 {
+				t.Errorf("entries = %v, want f and the temporary file", got)
+			}
+		})
+	}
+}
+
+func TestTS38_CreateNewFailedRemovalAndDirSyncAreJoined(t *testing.T) {
+	r, dir := privateRoot(t)
+	failAfterLink(t, "remove", "dirsync")
+	err := CreateNew(r, "f", []byte("new"), randomRule)
+	var we *WriteError
+	if !errors.As(err, &we) || we.Step != ErrTempRemove || !errors.Is(err, ErrDirSync) ||
+		!errors.Is(err, ErrMayBeRenamed) {
+		t.Errorf("err = %v, want ErrTempRemove joined with ErrDirSync", err)
+	}
+	if got := content(t, filepath.Join(dir, "f")); got != "new" {
+		t.Errorf("f = %q, want new", got)
+	}
+}
+
+func TestTS38_CreateNewNoDirSyncFailedRemoval(t *testing.T) {
+	r, _ := privateRoot(t)
+	seen := failAfterLink(t, "remove")
+	w := randomRule
+	w.NoDirSync = true
+	err := CreateNew(r, "f", []byte("new"), w)
+	if !errors.Is(err, ErrTempRemove) || slices.Contains(*seen, "dirsync") {
+		t.Errorf("err = %v, steps = %v", err, *seen)
+	}
+}
+
+func TestTS38_CreateNewDirSyncFailure(t *testing.T) {
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		t.Run(fmt.Sprintf("temp=%d", w.Temp), func(t *testing.T) {
+			r, dir := privateRoot(t)
+			failAfterLink(t, "dirsync")
+			err := CreateNew(r, "f", []byte("new"), w)
+			var we *WriteError
+			if !errors.As(err, &we) || we.Step != ErrDirSync || !errors.Is(err, syscall.EIO) ||
+				!errors.Is(err, ErrMayBeRenamed) {
+				t.Fatalf("err = %v, want a *WriteError of ErrDirSync with EIO", err)
+			}
+			if got := content(t, filepath.Join(dir, "f")); got != "new" {
+				t.Errorf("f = %q, want new", got)
+			}
+			if got := names(t, dir); !slices.Equal(got, []string{"f"}) {
+				t.Errorf("entries = %v, want f only", got)
+			}
+		})
+	}
+}
+
+func TestTS38_CreateNewCrashMatrix(t *testing.T) {
+	type stop struct {
+		step string
+		nth  int // the count of the step, from 1
+	}
+	stops := []stop{{"remove", 1}, {"create", 1}, {"write", 1}, {"sync", 1},
+		{"close", 1}, {"link", 1}, {"remove", 2}, {"dirsync", 1}}
+	for _, fixed := range []bool{true, false} {
+		for _, s := range stops {
+			if !fixed && s.step == "remove" && s.nth == 1 {
+				continue
+			}
+			t.Run(fmt.Sprintf("fixed=%v/%s%d", fixed, s.step, s.nth), func(t *testing.T) {
+				r, dir := privateRoot(t)
+				w := randomRule
+				if fixed {
+					w = fixedRule
+					put(t, dir, "f.tmp", "stale")
+				}
+				// A random name has one removal, after the link.
+				nth := s.nth
+				if !fixed && s.step == "remove" {
+					nth = 1
+				}
+				armed, last, count := true, "", 0
+				safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+					if !armed {
+						return nil
+					}
+					last = step
+					if step == s.step {
+						if count++; count == nth {
+							return safefiletest.Crash
+						}
+					}
+					return nil
+				}})
+				err := CreateNew(r, "f", []byte("new"), w)
+				if !errors.Is(err, safefiletest.Crash) || last != s.step || count != nth {
+					t.Fatalf("err = %v, last step = %q, count = %d", err, last, count)
+				}
+				linked := s.step == "dirsync" || (s.step == "remove" && s.nth == 2)
+				_, statErr := os.Lstat(filepath.Join(dir, "f"))
+				got := content(t, filepath.Join(dir, "f"))
+				switch {
+				case linked && got != "new":
+					t.Errorf("final name = %q, want new", got)
+				case !linked && !errors.Is(statErr, fs.ErrNotExist):
+					t.Errorf("final name = %q, want none", got)
+				}
+				if fixed && s.step == "remove" && s.nth == 1 &&
+					content(t, filepath.Join(dir, "f.tmp")) != "stale" {
+					t.Error("a crash at the removal removed the old temporary file")
+				}
+				armed = false
+				err = CreateNew(r, "f", []byte("again"), w)
+				if linked {
+					var we *WriteError
+					if !errors.As(err, &we) || we.Step != ErrExist {
+						t.Fatalf("next CreateNew: err = %v, want ErrExist", err)
+					}
+				} else if err != nil {
+					t.Fatalf("next CreateNew: %v", err)
+				}
+				want := "again"
+				if linked {
+					want = "new"
+				}
+				if got := content(t, filepath.Join(dir, "f")); got != want {
+					t.Errorf("after the next call = %q, want %q", got, want)
+				}
+				if got := names(t, dir); fixed && !slices.Equal(got, []string{"f"}) {
+					t.Errorf("entries after the next call = %v, want f only", got)
+				}
+			})
+		}
+	}
+}
