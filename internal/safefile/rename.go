@@ -9,11 +9,12 @@ import "os"
 // a slash gives ErrName, and nothing is renamed. A nil root gives ErrRule. A
 // link at the name to is replaced. Rename never follows it.
 //
-// Rename runs one Step "rename" with the name from, then root.Rename. Each
-// error other than seam.Crash is a *WriteError with the step ErrRename and no
-// path, so it matches ErrMayBeRenamed. A hook error fails the step, and nothing
-// is renamed. seam.Crash returns at once, and nothing is renamed. Rename does
-// not sync the directory. The caller calls SyncDir.
+// Rename runs one Step "rename" with the name from, then root.Rename. ErrRule
+// and ErrName come only from the arguments, and both are *Error values. Each
+// other error except seam.Crash is a *WriteError with the step ErrRename and
+// no path, so it matches ErrMayBeRenamed. A hook error fails the step, and
+// nothing is renamed. seam.Crash returns at once, and nothing is renamed.
+// Rename does not sync the directory. The caller calls SyncDir.
 func Rename(root *os.Root, from, to string) error {
 	if root == nil {
 		return fail(ErrRule, nil)

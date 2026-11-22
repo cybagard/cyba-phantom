@@ -224,7 +224,7 @@ var (
 )
 
 // setStep sets the function that the Step hook of safefile calls. It sets the
-// hook itself once for each test binary run. The test restores both at its end.
+// hook itself once for each test. The test restores both at its end.
 func setStep(t *testing.T, fn func(step, name string) error) {
 	t.Helper()
 	if !stepSet {
