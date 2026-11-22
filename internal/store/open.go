@@ -59,11 +59,13 @@ type Options struct {
 	// Reserved lists the directories that the database must not be in:
 	// tlog.dir, acme.cache_dir, and the directory of bundle.path. Each entry is a
 	// clean path relative to the state directory; "." is the state directory
-	// itself. The store adds the fixed directories keys and checkpoints itself.
-	// It also adds the fixed names checkpoint.state, checkpoint.state.tmp and
-	// writer.stop (ADR-020, ADR-022). The match changes A-Z to a-z in the path
-	// and in each reserved path. No other byte changes. The store does not
-	// import internal/config.
+	// itself. An entry may have only the bytes A-Z a-z 0-9 . _ - and "/"
+	// between its parts. Open refuses any other byte as "reserved directory",
+	// also when store.path does not match the entry. The store adds the fixed
+	// directories keys and checkpoints itself. It also adds the fixed names
+	// checkpoint.state, checkpoint.state.tmp and writer.stop (ADR-020, ADR-022).
+	// The match changes A-Z to a-z in the path and in each reserved path. No
+	// other byte changes. The store does not import internal/config.
 	Reserved []string
 }
 
@@ -427,16 +429,15 @@ func checkPath(rel string, opt Options) error {
 	if !fs.ValidPath(rel) || rel == "." {
 		return fail(key, rulePathForm)
 	}
-	for i := 0; i < len(rel); i++ {
-		c := rel[i]
-		if c != '/' && c != '.' && c != '_' && c != '-' &&
-			(c < '0' || c > '9') && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
-			return fail(key, ruleChars)
-		}
+	if !pathChars(rel) {
+		return fail(key, ruleChars)
 	}
 	for _, d := range opt.Reserved {
 		if !fs.ValidPath(d) {
 			return fail("reserved directory", rulePathForm)
+		}
+		if !pathChars(d) {
+			return fail("reserved directory", ruleChars)
 		}
 	}
 	low := foldASCII(rel)
@@ -452,6 +453,19 @@ func checkPath(rel string, opt Options) error {
 		}
 	}
 	return nil
+}
+
+// pathChars reports whether s has only the bytes A-Z a-z 0-9 . _ - and the
+// separator "/".
+func pathChars(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '/' && c != '.' && c != '_' && c != '-' &&
+			(c < '0' || c > '9') && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 // foldASCII changes the letters A-Z in s to a-z. No other byte changes, so a

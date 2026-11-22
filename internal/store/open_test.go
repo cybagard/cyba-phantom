@@ -167,8 +167,9 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 	_, err = Open(root, "zone/events.db", Options{Reserved: []string{"ZONE"}})
 	wantRule(t, err, "store.path", ruleReserved)
 	// Only the ASCII letters fold: U+212A (Kelvin sign) is not the letter k.
+	// A reserved entry with it is refused for its characters.
 	_, err = Open(root, "kibana/events.db", Options{Reserved: []string{"\xe2\x84\xaaibana"}})
-	wantRule(t, err, "kibana", ruleParent)
+	wantRule(t, err, "reserved directory", ruleChars)
 	// A name that only starts like a reserved directory is allowed by the path
 	// rules; the parent check then refuses it because it does not exist.
 	_, err = Open(root, "tlog2/events.db", opt)
@@ -176,6 +177,59 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 	// The edge bytes Z, 0 and 9 pass the path rules.
 	_, err = Open(root, "Z09/events.db", opt)
 	wantRule(t, err, "Z09", ruleParent)
+}
+
+// T-S-15: a reserved directory of the caller with a byte outside A-Z a-z 0-9 . _
+// - is refused as "reserved directory", before any compare and also when
+// store.path does not match it. No file changes. The rule is ruleChars, or
+// rulePathForm where fs.ValidPath refuses the entry first.
+func TestTS15ReservedDirectoryCharsAreRefused(t *testing.T) {
+	root, state, outside := newState(t)
+	before := snapshot(t, state) + snapshot(t, outside)
+	type refusal struct{ entry, rule string }
+	var cases []refusal
+	for b := 0; b < 256; b++ {
+		if c := byte(b); c == '/' || c == '.' || c == '_' || c == '-' ||
+			c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' {
+			continue
+		}
+		// The byte is in the first part, and in the second part of a two-part entry.
+		for _, e := range []string{"x" + string([]byte{byte(b)}) + "y", "bundle/x" + string([]byte{byte(b)})} {
+			rule := ruleChars
+			if !fs.ValidPath(e) { // for example, a byte that is not valid UTF-8
+				rule = rulePathForm
+			}
+			cases = append(cases, refusal{e, rule})
+		}
+	}
+	// U+017F (long s) and U+212A (Kelvin sign) look like ASCII letters in a fold.
+	for _, e := range []string{"tlo\xc5\xbf", "\xe2\x84\xaaibana", "bundle/\xe2\x84\xaa"} {
+		cases = append(cases, refusal{e, ruleChars})
+	}
+	for _, c := range cases {
+		for _, rel := range []string{"events.db", "x/events.db"} {
+			db, err := Open(root, rel, Options{Reserved: []string{c.entry}})
+			if db != nil {
+				db.Close()
+			}
+			wantRule(t, err, "reserved directory", c.rule)
+		}
+	}
+	// The check comes before the compares: a good entry that matches store.path
+	// does not hide a bad entry after it.
+	for _, res := range [][]string{{"tlog", "x+"}, {".", "x+"}, {"TLOG", "tlo\xc5\xbf"}} {
+		_, err := Open(root, "tlog/events.db", Options{Reserved: res})
+		wantRule(t, err, "reserved directory", ruleChars)
+	}
+	if snapshot(t, state)+snapshot(t, outside) != before {
+		t.Fatal("a refused open changed a file")
+	}
+
+	// The edge bytes and a two-part entry pass the character rule.
+	for _, e := range []string{"A", "Z", "a", "z", "0", "9", "_", "-", ".x", "bundle/x", "A.z_0-9/Z9"} {
+		_, err := Open(root, "Z09/events.db", Options{Reserved: []string{e}})
+		wantRule(t, err, "Z09", ruleParent)
+	}
 }
 
 // T-S-15: Open resolves a symlink part of the state directory path. The driver
