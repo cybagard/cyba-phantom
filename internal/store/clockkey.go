@@ -176,26 +176,55 @@ func (w *Writer) writeKey(st sensortime.State, jump *sensortime.JumpResult) (err
 	if err != nil {
 		return fail(writerName, ruleDatabase)
 	}
-	w.floorEvent, w.floorSession = st.NextEvent, st.NextSession
-	// The floor is not below the values in memory. After a grace jump, a new
-	// row must not get a rowid in the range of the jump.
-	w.nextEvent, w.nextSession = st.NextEvent, st.NextSession
-	w.lastKey = st.BootClock
 	if jump != nil && jump.Kind == sensortime.KindGrace {
 		w.graceAt = max(w.graceAt, st.Jump.At)
 	}
-	w.clk.Committed()
+	w.keyStored(st)
 	return nil
 }
 
+// keyStored sets the state in memory after a COMMIT that stored the key of st.
+// The floor is not below the values in memory. After a grace jump, a new row
+// must not get a rowid in the range of the jump. It then calls Committed.
+func (w *Writer) keyStored(st sensortime.State) {
+	w.floorEvent, w.floorSession = st.NextEvent, st.NextSession
+	w.nextEvent, w.nextSession = st.NextEvent, st.NextSession
+	w.lastKey = st.BootClock
+	w.clk.Committed()
+}
+
+// moveKey writes the key in the transaction of a batch that moves a range end
+// (ADR-043). The state is the Snapshot of the clock. The rowid floor is the
+// largest of three values. The first is the floor that the writer wrote last.
+// The second is the floor of the Snapshot. The third is the next rowid of event
+// and of session after the batch. The caller calls keyStored after the COMMIT.
+// Between moveKey and keyStored, the writer calls no Check.
+func (w *Writer) moveKey(ctx context.Context, tx *sql.Tx, nextEv, nextSes int64) (sensortime.State, error) {
+	st, err := w.clk.Snapshot()
+	if err != nil {
+		return st, fail(clockName, ruleClock)
+	}
+	st.NextEvent = max(w.floorEvent, st.NextEvent, nextEv)
+	st.NextSession = max(w.floorSession, st.NextSession, nextSes)
+	v, err := st.Encode()
+	if err != nil {
+		return st, fail(clockName, ruleClock)
+	}
+	if _, err := tx.ExecContext(ctx, metaSetSQL, sensorTimeKey, v); err != nil {
+		return st, fail(writerName, ruleDatabase)
+	}
+	return st, nil
+}
+
 // moveEndSQL makes the statement that moves the end of the ranges of the grace
-// rows of this process. The first two values are the first and the last rowid
-// of the batch. The next three values are these. One is the largest id of an
-// earlier process. One is the smallest time of the batch. One is the reset
-// `at`. For each grace row, the subquery finds the largest rowid of the batch
-// with a time before `at`. The `+` before the time column keeps the planner off
-// the time index. The update moves an end only up. The statement uses the
-// primary key of clock_jump and a rowid range of the table.
+// rows of this process. The statement takes five values in this order. The
+// first and the second are the first and the last rowid of the batch. The third
+// is the largest id of an earlier process. The fourth is the smallest time of
+// the batch. The fifth is the reset `at`. For each grace row, the subquery
+// finds the largest rowid of the batch with a time before `at`. The `+` before
+// the time column keeps the planner off the time index. The update moves an end
+// only up. The statement uses the primary key of clock_jump and a rowid range
+// of the table.
 func moveEndSQL(table, idCol, timeCol string, k rowKind) string {
 	return "UPDATE clock_jump SET " + k.to + " = m.hi FROM (SELECT c.id AS cid, " +
 		"(SELECT max(" + idCol + ") FROM " + table + " WHERE " + idCol + " BETWEEN ? AND ? AND +" + timeCol + " < c.at) AS hi " +
@@ -210,14 +239,14 @@ var (
 
 // moveEnds moves the end of the ranges of each grace row of this process. It
 // runs in the transaction of a batch (ADR-043). The batch has the event rowids
-// firstEv to lastEv. It has the new session rowids firstSes to lastSes. A grace
-// row takes the largest rowid of these with a time before its `at`. For a
-// session, the time is first_seen. A session that the batch only updates keeps
-// its old rowid. That rowid is not in the range, so it does not count. A grace
-// row with no such rowid keeps its end. minTS is the smallest time of the
-// batch. It leaves out the grace rows that no row of the batch can match. The
+// firstEv to lastEv and the new session rowids firstSes to lastSes. A grace row
+// takes the largest of these rowids with a time before its `at`. For a session,
+// the time is first_seen. A session that the batch only updates keeps its old
+// rowid. That rowid is not in the range, so it does not count. A grace row with
+// no such rowid keeps its end. minTS is the smallest time of the batch. The
+// statement leaves out the grace rows that no row of the batch can match. The
 // caller runs moveEnds only when minTS is before the largest `at` of this
-// process. It uses no memory for each row.
+// process. The call keeps no memory for each row.
 func (w *Writer) moveEnds(ctx context.Context, tx *sql.Tx, firstEv, lastEv, firstSes, lastSes, minTS int64) error {
 	if w.beforeMove != nil {
 		w.beforeMove()

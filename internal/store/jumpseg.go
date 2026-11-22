@@ -22,9 +22,9 @@ var (
 // same sum of j.
 type segment struct{ lo, hi, sum int64 }
 
-// resetAt is the `at` of a reset row. A row of this value has no test of the
-// row time: each row of its ranges takes its j. Any other `at` is the S of a
-// grace jump. A row of its ranges takes the j only when its time is before it.
+// resetAt is the `at` of a reset row. A reset row has no test of the row time:
+// each row of its ranges takes its j. Any other `at` is the S of a grace jump.
+// A row of its ranges takes the j only when the row time is before that `at`.
 const resetAt = math.MaxInt64
 
 // A graceRow is a clock_jump row with an `at` test.
@@ -54,8 +54,9 @@ type jumpSums struct {
 //
 // A step calls sums one time for each step call, not one time for each run.
 // The writer can move the end of a range between two chunks. A call then sees
-// the ranges that its own transaction sees. The memory is a bound times the
-// count of the clock_jump rows.
+// the ranges that its own transaction sees. The memory of a call is about 160
+// bytes for each clock_jump row. This is two changes of 40 bytes, two segments
+// of 24 bytes and one grace row of 32 bytes.
 func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT "+k.from+", "+k.to+", j, at FROM clock_jump WHERE "+k.from+" <= "+k.to)
 	if err != nil {

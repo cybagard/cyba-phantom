@@ -161,8 +161,8 @@ type Writer struct {
 	lastCheck, lastKey time.Duration
 	// knownJump is the largest clock_jump id at StartClock. A row with a larger
 	// id is a row of this process. graceAt is the largest `at` of the grace
-	// rows that this process wrote, or 0 with none. A batch with no row before
-	// it moves no range end (see moveEnds).
+	// rows that this process wrote, or 0 with none. A batch moves no range end
+	// when each of its rows has a time at or after graceAt (see moveEnds).
 	knownJump, graceAt int64
 	// beforeMove runs at the start of each moveEnds call. A test sets it; nil
 	// in production.
@@ -419,8 +419,9 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 
 // write stores one batch in one transaction. It makes the record bytes and the
 // hash of each evidence event first, with one encode. For a batch with
-// evidence it takes the one pool connection and sets synchronous=FULL on it
-// before BEGIN. It sets NORMAL again when the transaction has ended, after a
+// evidence, or a batch that moves a range end and writes the key, it takes the
+// one pool connection and sets synchronous=FULL on it before BEGIN. It sets
+// NORMAL again when the transaction has ended, after a
 // commit and after a rollback. A failure to set either value is a database
 // error. Suppose write returns an error and the COMMIT did not succeed. Then
 // write counts each event of the batch as a drop. The lane of each drop is the
@@ -521,7 +522,7 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 		return fail(writerName, ruleDatabase)
 	}
 	defer conn.Close()
-	if len(hs) > 0 {
+	if len(hs) > 0 || w.movesEnd(recs) {
 		if err := w.pragma(ctx, conn, "PRAGMA synchronous=FULL"); err != nil {
 			return fail(writerName, ruleDatabase)
 		}
@@ -533,6 +534,20 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	}
 	committed, err = w.transact(ctx, conn, batch, recs, bs, hs, evidence, day, key, begin)
 	return err
+}
+
+// movesEnd tells if a batch of recs moves a range end. Then the transaction
+// writes the key, so the pragma is FULL before the BEGIN (see transact).
+func (w *Writer) movesEnd(recs []event.Record) bool {
+	if w.clk == nil {
+		return false
+	}
+	for _, rec := range recs {
+		if rec.TS < w.graceAt {
+			return true
+		}
+	}
+	return false
 }
 
 // now reads w.clock, or time.Now when a test sets no clock.
@@ -698,9 +713,15 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		return false, err
 	}
 	// A row in flight can have a time before the `at` of a grace row of this
-	// process. The move of the ranges is in this transaction.
-	if w.clk != nil && minTS < w.graceAt {
+	// process. The move of the ranges and the key with the rowid floor are in
+	// this transaction. A batch that moves no end writes no key.
+	var ck sensortime.State
+	moved := w.clk != nil && minTS < w.graceAt
+	if moved {
 		if err := w.moveEnds(ctx, tx, firstEv, nextEv-1, firstSes, nextSes-1, minTS); err != nil {
+			return false, err
+		}
+		if ck, err = w.moveKey(ctx, tx, nextEv, nextSes); err != nil {
 			return false, err
 		}
 	}
@@ -736,6 +757,9 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	}
 	if w.clk != nil {
 		w.nextEvent, w.nextSession = nextEv, nextSes
+	}
+	if moved {
+		w.keyStored(ck)
 	}
 	// A rolled-back batch counts no duplicate and no unlinked callback.
 	w.mintDups.Add(mints.dups)

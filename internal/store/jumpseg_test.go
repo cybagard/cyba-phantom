@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -111,8 +112,8 @@ var corrCases = []corrCase{
 	{name: "event delete", days: 90, corrected: true, seed: seedEvent("request"), bulk: bulkEvent("request"),
 		acted: rowGone("event", "id"), mk: func() retentionStep { return newEventExpireStep(rollTDel, 90) },
 		setup: func(tb testing.TB, db *sql.DB) { mustExec(tb, db, metaSetSQL, rollupDoneKey, "9999-12-31") }},
-	// The session delete has no bulk. It costs 4 of the limit, so the read
-	// bound tests do not fit it. A test of its cost covers it.
+	// The session delete has no bulk. A row costs 4 of the limit, so the tests
+	// of the read bound do not fit the step. A test of its cost covers the step.
 	{name: "session delete", days: 90, corrected: true, session: true, seed: seedSession,
 		acted: rowGone("session", "rowid"), mk: func() retentionStep { return newJumpSessionExpireStep(rollTDel, 90) }},
 	{name: "token delete", days: 90, acted: rowGone("token", "session_id"),
@@ -755,10 +756,20 @@ func TestTU30TwoGraceJumpsGiveTwoRowsAndEachRowTakesItsOwnJ(t *testing.T) {
 	if got := ends(t, r.db); got != "2/0 2/0" {
 		t.Fatalf("ends %q, want 2/0 2/0", got)
 	}
-	// Row 1 acts with the J of 2 h, and row 2 with 5 h.
-	eventDeleteAt(t, r, at1+1+2*hourMs+1)
-	if left := eventIDs(t, r.db); left != "2" {
-		t.Fatalf("rows left %q, want 2: the row 1 takes only the second J", left)
+	// Row 1 has the time at1 + 1. It takes only the J of 2 h, so it acts at the
+	// cutoff at1 + 2 h + 2, and not at the cutoff 1 ms before. With no J it acts
+	// at the first cutoff. With both J it stays at the second. Row 2 has the time
+	// at1 - 1. It takes both J, 5 h in all, so it acts at the cutoff at1 + 5 h,
+	// and not at the cutoff 1 ms before. With the first J only, it acts at the
+	// last two cutoffs.
+	for _, c := range []struct {
+		cutoff int64
+		left   string
+	}{{at1 + 2*hourMs + 1, "1 2"}, {at1 + 2*hourMs + 2, "2"}, {at1 + 5*hourMs - 1, "2"}, {at1 + 5*hourMs, ""}} {
+		eventDeleteAt(t, r, c.cutoff)
+		if left := eventIDs(t, r.db); left != c.left {
+			t.Fatalf("cutoff at1 + %d ms: rows left %q, want %q", c.cutoff-at1, left, c.left)
+		}
 	}
 }
 
@@ -980,4 +991,113 @@ func TestTU27CursorReadErrorIsReturned(t *testing.T) {
 func TestTU27JumpRowWithJOfZeroChangesNoRow(t *testing.T) {
 	jumps := []testJump{{3, 4, 0}}
 	checkCorrections(t, jumps, jumps, 8)
+}
+
+// T-U-27, T-U-30: a batch that moves an end writes the key with the rowid floor
+// in the same transaction, with synchronous=FULL. The floor is above the new
+// rowids. A batch with a row at `at` moves no end and writes no key. A batch
+// that rolls back leaves the key, the floor in memory and the ends as they were.
+func TestTU30MoveOfAnEndWritesTheKeyWithTheRowidFloor(t *testing.T) {
+	r, f := clockRig(t)
+	moves := 0
+	var pragmas []string
+	r.w.beforeMove = func() { moves++ }
+	r.w.beforePragma = func(s string) error { pragmas = append(pragmas, s); return nil }
+	at := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	pragmas = nil
+	before, floor := metaValue(t, r.db, sensorTimeKey), r.w.floorEvent
+	// The row 1 has the time `at`: no row of the batch is before it.
+	r.writeOK(evAt(t, event.KindRequest, at))
+	if moves != 0 || len(pragmas) != 0 || metaValue(t, r.db, sensorTimeKey) != before {
+		t.Fatalf("a row at `at`: %d moves, pragmas %v; want no move, no pragma and the same key", moves, pragmas)
+	}
+	r.w.beforeCommit = func(*sql.Tx) error { return errors.New("no commit") }
+	if err := r.w.write([]*event.Event{evAt(t, event.KindRequest, at-1), sessEvent(t, event.KindRequest, "a", "", "", at-1)}); err == nil {
+		t.Fatal("the write did not fail")
+	}
+	r.w.beforeCommit = nil
+	if got := ends(t, r.db); got != "0/0" || metaValue(t, r.db, sensorTimeKey) != before || r.w.floorEvent != floor {
+		t.Fatalf("after a rollback: ends %q, floor %d; want 0/0, the same key and the floor %d", got, r.w.floorEvent, floor)
+	}
+	// The rows 2 and 3 are event rows. The session has the rowid 1.
+	pragmas = nil
+	r.writeOK(evAt(t, event.KindRequest, at-1), sessEvent(t, event.KindRequest, "a", "", "", at-2))
+	st := r.key()
+	if got := ends(t, r.db); got != "3/1" || st.NextEvent <= 3 || st.NextSession <= 1 ||
+		r.w.floorEvent != st.NextEvent || r.w.floorSession != st.NextSession || fmt.Sprint(pragmas) != "[PRAGMA synchronous=FULL PRAGMA synchronous=NORMAL]" {
+		t.Fatalf("ends %q, key floors %d and %d, pragmas %v; want 3/1, floors above 3 and 1, FULL then NORMAL", got, st.NextEvent, st.NextSession, pragmas)
+	}
+}
+
+// T-U-30: an earlier process wrote a grace row with empty ranges and an `at` far
+// ahead. A row in flight is before that `at`, but this process does not move the
+// end of that row. It moves the end of its own grace row, which has the id
+// after the largest id at the start.
+func TestTU30EndOfAnEarlierProcessRowDoesNotMove(t *testing.T) {
+	r, f := newRig(t, 8), &fakeSrc{}
+	addGrace(t, r.db, 1, 1, 0, hourMs, math.MaxInt64-1)
+	if err := r.w.StartClock(f.source()); err != nil {
+		t.Fatal(err)
+	}
+	at := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	r.writeOK(evAt(t, event.KindRequest, at-1))
+	if got := ends(t, r.db); got != "0/0 1/0" {
+		t.Fatalf("ends %q, want 0/0 1/0: only the row of this process moves", got)
+	}
+}
+
+// runAtMs makes the production run of a schedule of the rig at the time st, in
+// unix ms. The writer serves the run in this goroutine.
+func runAtMs(t *testing.T, r *rig, st int64) {
+	t.Helper()
+	s := NewSchedule(r.w, 7, 30, 90, nil)
+	s.run = direct(r)
+	s.runAt(context.Background(), time.UnixMilli(st))
+	if n := s.EarlyEnds(); n != 0 {
+		t.Fatalf("the run ended early %d times", n)
+	}
+}
+
+// T-U-11, T-U-30: the run keeps a grace row of its own process that has empty
+// ranges, 100 d after the jump. It deletes an empty row of an earlier process.
+func TestTU30ScheduleRunKeepsTheGraceRowOfThisProcess(t *testing.T) {
+	r, f := newRig(t, 8), &fakeSrc{}
+	mustExec(t, r.db, "INSERT INTO clock_jump VALUES (1, 5, 4, 5, 4, 1, 5)")
+	if err := r.w.StartClock(f.source()); err != nil {
+		t.Fatal(err)
+	}
+	at := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	runAtMs(t, r, at+100*rawDay)
+	if got := rawText(t, r.db, "SELECT coalesce(group_concat(id, ' '), '') FROM clock_jump"); got != "2" {
+		t.Fatalf("clock_jump ids %q, want 2: the row of this process stays", got)
+	}
+}
+
+// T-U-27, T-U-30: the run deletes a session with the clock_jump correction. The
+// session has a last_seen before the `at` of a grace row of +3 h. The cutoff is
+// 1 h after `at`. The plain session delete would remove the session. The
+// corrected one keeps it.
+func TestTU30ScheduleRunDeletesSessionsWithTheCorrection(t *testing.T) {
+	r, f := clockRig(t)
+	at := graceNow(t, r, f, 2*time.Minute, 3*time.Hour)
+	r.writeOK(sessEvent(t, event.KindRequest, "a", "", "", at-2))
+	runAtMs(t, r, at+hourMs+90*rawDay)
+	if n := count(t, r.db, "SELECT count(*) FROM session"); n != 1 {
+		t.Fatalf("%d sessions left, want 1: the grace row keeps the session", n)
+	}
+}
+
+// T-U-27: the session delete returns the limit when it read the most entries,
+// also when the limit is not a multiple of 4. Else the run would take the step
+// as done and end the delete early. 300 sessions act. The limit 997 reads 249
+// entries, and the limit 7 reads 1.
+func TestTU27SessionDeleteReturnsTheLimitForALimitThatIsNotAMultipleOf4(t *testing.T) {
+	db := migrated(t)
+	addGrace(t, db, 100, 5000, 5001, hourMs, math.MaxInt64-1)
+	bulkSession(t, db, 1, 300, rollCutoff(90)-1000)
+	step := newJumpSessionExpireStep(rollTDel, 90)
+	got := []int{call(t, db, step, 997), call(t, db, step, 7)}
+	if left := count(t, db, "SELECT count(*) FROM session"); fmt.Sprint(got) != "[997 7]" || left != 50 {
+		t.Fatalf("calls returned %v and left %d rows; want [997 7] and 50", got, left)
+	}
 }
