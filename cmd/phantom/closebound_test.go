@@ -45,10 +45,8 @@ type closeRun struct {
 // of the close wait.
 func launchClose(t *testing.T, slow time.Duration, run func(context.Context, *tlog.Checkpointer, *event.Queue)) *closeRun {
 	t.Helper()
-	oldServed := served
-	t.Cleanup(func() { served = oldServed })
 	c := &closeRun{}
-	served = func() {
+	seamsOf(t).served = func() {
 		time.Sleep(slow)
 		now := time.Now()
 		c.mu.Lock()
@@ -121,6 +119,16 @@ func (c *closeRun) waitServeEnd(t *testing.T) {
 func TestTU18_CloseTimeIsBound(t *testing.T) {
 	if closeTime != boundTime {
 		t.Errorf("closeTime is %v, want %v", closeTime, boundTime)
+	}
+}
+
+// TestTU18_DefaultServedStep checks that a nil served field gives the served
+// package variable. No test sets that variable, so this test reads it only.
+func TestTU18_DefaultServedStep(t *testing.T) {
+	got := reflect.ValueOf(seams{}.orDefault().served).Pointer()
+	want := reflect.ValueOf(served).Pointer()
+	if got != want {
+		t.Errorf("the default served step is at %#x, want the served variable at %#x", got, want)
 	}
 }
 
