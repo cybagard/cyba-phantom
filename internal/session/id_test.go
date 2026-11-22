@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 const ja4 = "t13d1516h2_8daaf6152771_b186095e22b6"
@@ -36,9 +38,9 @@ func idHex(t *testing.T, id *string) string {
 func TestTU24KnownAnswers(t *testing.T) {
 	k := seqKey()
 	for _, c := range []struct{ ip, ja4, want string }{
-		{"198.51.100.23", ja4, "9f5eae7d953e15154ade0a558546405d"},
-		{"2001:db8:abcd:1234::1", "", "2476f3bc714f2f5606deac0d6d26b5e1"},
-		{"198.51.100.23", "", "ef9adff2fbaba4068b3beb5d3e73a89a"},
+		{"198.51.100.23", ja4, "fb93b50613e54015f5ffa1a7aec6f158"},
+		{"2001:db8:abcd:1234::1", "", "e2ac800c9eb321d4f59acb734c16e991"},
+		{"198.51.100.23", "", "79218a485663e84422081e7d9ff4e964"},
 	} {
 		if got := idHex(t, k.SessionID(c.ip, c.ja4)); got != c.want {
 			t.Errorf("SessionID(%q, %q) = %s, want %s", c.ip, c.ja4, got, c.want)
@@ -51,6 +53,29 @@ func TestTU24KnownAnswers(t *testing.T) {
 		if got := k.IPHMAC(netip.MustParseAddr(c.ip)); got != c.want {
 			t.Errorf("IPHMAC(%q) = %s, want %s", c.ip, got, c.want)
 		}
+	}
+}
+
+// T-S-22: the session id input has the key length byte. The IPv4 key 32.1.13.184
+// with a JA4 text of 12 NUL bytes and "x" makes the same bytes as the IPv6 key
+// 2001:db8:: with the JA4 text "x", if the length byte is left out.
+func TestTS22SessionIDKeyLengthByte(t *testing.T) {
+	k := seqKey()
+	v4, v6 := "32.1.13.184", "2001:db8::1"
+	ja4v4, ja4v6 := strings.Repeat("\x00", 12)+"x", "x"
+	flat := func(ip, j string) string {
+		c, ok := event.CounterKey(netip.MustParseAddr(ip))
+		if !ok {
+			t.Fatalf("no counter key for %q", ip)
+		}
+		return sessionPrefix + "\x00" + string(c.AsSlice()) + j
+	}
+	if flat(v4, ja4v4) != flat(v6, ja4v6) {
+		t.Fatal("the two inputs without the length byte are not equal bytes")
+	}
+	a, b := idHex(t, k.SessionID(v4, ja4v4)), idHex(t, k.SessionID(v6, ja4v6))
+	if a == b {
+		t.Errorf("one id %s for an IPv4 key and an IPv6 key", a)
 	}
 }
 

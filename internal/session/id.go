@@ -39,8 +39,10 @@ var sessionEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // SessionID returns the session id of a client, for the writer and for the
 // request path. The id is the first 16 bytes of HMAC-SHA256 over the prefix,
-// 0x00, the client key and the JA4 text. It is lower-case base32 with no
-// padding. ip is the client address text. It returns nil when ip is empty or is
+// 0x00, the length of the client key as one byte, the client key and the JA4
+// text. The length byte is 0x04 for an IPv4 key and 0x10 for an IPv6 key. It
+// stops an IPv4 key and the start of the JA4 text from making the same input
+// as an IPv6 key. The id is lower-case base32 with no padding. ip is the client address text. It returns nil when ip is empty or is
 // not an address, and for the zero Key. It never returns the text of a parse
 // error, because that text holds the input.
 func (k Key) SessionID(ip, ja4 string) *string {
@@ -58,8 +60,9 @@ func (k Key) SessionID(ip, ja4 string) *string {
 	}
 	m := hmac.New(sha256.New, s.key[:])
 	m.Write([]byte(sessionPrefix))
-	m.Write([]byte{0})
-	m.Write(c.AsSlice())
+	key := c.AsSlice()
+	m.Write([]byte{0, byte(len(key))})
+	m.Write(key)
 	m.Write([]byte(ja4))
 	id := strings.ToLower(sessionEncoding.EncodeToString(m.Sum(nil)[:16]))
 	return &id
