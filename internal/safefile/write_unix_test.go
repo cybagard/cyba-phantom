@@ -951,8 +951,8 @@ func entryState(p string) string {
 	return fmt.Sprintf("%v %q", fi.Mode(), b)
 }
 
-// An entry that appears at the temporary name before the create is not
-// followed, not changed and not removed: the create fails with EEXIST.
+// An entry appears at the temporary name before the create. The create fails
+// with EEXIST. The entry stays, and nothing follows it.
 func TestTS38_ReplacePlantedTempEntryIsKept(t *testing.T) {
 	kinds := []string{"symlink in root", "symlink outside", "dangling symlink",
 		"regular file", "hard link"}
