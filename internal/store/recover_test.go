@@ -414,6 +414,22 @@ func TestTI07MarkerIsTriedAgainAfterAStopDuringRun(t *testing.T) {
 	}
 }
 
+// privateRoot opens a new state directory with the mode 0o700. t.TempDir can
+// have group or other bits, and the directory rule of SyncDir refuses them.
+func privateRoot(t *testing.T) *os.Root {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return root
+}
+
 // T-I-07: makeMarker gives an error in a state directory that is gone.
 // OpenFile gives the error: Open of "." and Sync work on that directory.
 func TestTI07MarkerFailsInARemovedDirectory(t *testing.T) {
@@ -448,11 +464,7 @@ func TestTI07MarkerCloseFails(t *testing.T) {
 		}
 		return errClose
 	}})
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
+	root := privateRoot(t)
 	var out bytes.Buffer
 	w := &Writer{rec: Recovery{State: root}, log: slog.New(slog.NewTextHandler(&out, nil))}
 	w.ensureMarker()
@@ -486,11 +498,7 @@ func TestTI07MarkerDirectorySyncFailsAfterMarkerFile(t *testing.T) {
 		}
 		return errSync
 	}})
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
+	root := privateRoot(t)
 	if err := makeMarker(root); !errors.Is(err, errSync) || !errors.Is(err, safefile.ErrDirSync) || ran != 1 {
 		t.Fatalf("makeMarker gave %v after %d directory syncs, want the sync error", err, ran)
 	}
@@ -525,11 +533,7 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 				}
 				return nil
 			}})
-			root, err := os.OpenRoot(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer root.Close()
+			root := privateRoot(t)
 			wantDirs := 0
 			if failDir {
 				wantDirs = 1
@@ -590,11 +594,7 @@ func TestTI07MarkerThatExistsIsFollowedByTheDirectorySync(t *testing.T) {
 		hook error // the error of the directory sync
 	}{{"directory sync passes", nil}, {"directory sync fails", errSync}} {
 		t.Run(c.name, func(t *testing.T) {
-			root, err := os.OpenRoot(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer root.Close()
+			root := privateRoot(t)
 			if err := os.WriteFile(filepath.Join(root.Name(), markerName), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -608,7 +608,7 @@ func TestTI07MarkerThatExistsIsFollowedByTheDirectorySync(t *testing.T) {
 				dirs++
 				return c.hook
 			}})
-			err = makeMarker(root)
+			err := makeMarker(root)
 			if dirs != 1 || len(others) != 0 {
 				t.Fatalf("directory syncs %d, other steps %q; want 1 and none", dirs, others)
 			}
@@ -637,12 +637,8 @@ func TestTI07MarkerKeepsTheSyncErrorWhenTheCloseFailsToo(t *testing.T) {
 		}
 		return nil
 	}})
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-	err = makeMarker(root)
+	root := privateRoot(t)
+	err := makeMarker(root)
 	if !errors.Is(err, errSync) || errors.Is(err, errClose) || closes != 1 {
 		t.Fatalf("makeMarker gave %v after %d closes, want the sync error only", err, closes)
 	}
@@ -655,11 +651,7 @@ func TestTS38StopAtMarkerStepsLeavesAMarker(t *testing.T) {
 	for _, step := range []string{"sync", "close", "dirsync"} {
 		t.Run(step, func(t *testing.T) {
 			ran := stopAt(t, step)
-			root, err := os.OpenRoot(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer root.Close()
+			root := privateRoot(t)
 			catchPanic(t, func() { makeMarker(root) })
 			if !ran() {
 				t.Fatal("the stop hook did not run")
