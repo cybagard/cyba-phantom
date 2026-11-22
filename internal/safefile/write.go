@@ -144,10 +144,12 @@ func syncRoot(d *os.Root, dir string) error {
 // SyncDir opens dir below root with OpenRoot and the directory rule r, syncs
 // the directory and closes it. A link at any part of dir gives ErrSymlink, as
 // for OpenRoot. The name "." is the root itself. The caller opened it, so r is
-// not applied to it. Each error is a *WriteError with the step ErrDirSync. It
-// holds the refusal of OpenRoot, the sync error or the close error as its
-// cause. A nil root, or a rule that is not a rule for a directory, gives
-// ErrRule. A Step hook that gives seam.Crash makes SyncDir return that error.
+// not applied to it. Each error other than seam.Crash is a *WriteError with
+// the step ErrDirSync. It holds the refusal of OpenRoot, the sync error or the
+// close error as its cause. Each such error matches ErrMayBeRenamed, also when
+// no rename came before the call. A nil root, or a rule that is not a rule for
+// a directory, gives ErrRule. A Step hook that gives seam.Crash makes SyncDir
+// return that error.
 func SyncDir(root *os.Root, dir string, r Rule) error {
 	if root == nil || !r.valid() || r.Type != Dir {
 		return writeFail(ErrDirSync, fail(ErrRule, nil), true)
