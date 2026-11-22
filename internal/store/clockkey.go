@@ -183,9 +183,10 @@ func (w *Writer) writeKey(st sensortime.State, jump *sensortime.JumpResult) (err
 	return nil
 }
 
-// keyStored sets the state in memory after a COMMIT that stored the key of st.
-// The floor is not below the values in memory. After a grace jump, a new row
-// must not get a rowid in the range of the jump. It then calls Committed.
+// keyStored sets the state in memory. Call it only after a COMMIT that stored
+// the key of st. The floor is not below the values in memory. After a grace
+// jump, a new row must not get a rowid in the range of the jump. Then it calls
+// Committed.
 func (w *Writer) keyStored(st sensortime.State) {
 	w.floorEvent, w.floorSession = st.NextEvent, st.NextSession
 	w.nextEvent, w.nextSession = st.NextEvent, st.NextSession

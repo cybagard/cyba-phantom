@@ -24,7 +24,8 @@ type segment struct{ lo, hi, sum int64 }
 
 // resetAt is the `at` of a reset row. A reset row has no test of the row time:
 // each row of its ranges takes its j. Any other `at` is the S of a grace jump.
-// A row of its ranges takes the j only when the row time is before that `at`.
+// A grace row gives its j to a row of its ranges only when the row time is
+// before `at`.
 const resetAt = math.MaxInt64
 
 // A graceRow is a clock_jump row with an `at` test.
@@ -36,8 +37,8 @@ type jumpSums struct {
 	// segs holds the sums of the reset rows. They are in rowid order, with no
 	// overlap, and they cover all rowids.
 	segs []segment
-	// grace holds the rows with an `at` test. An entry takes the j of one when
-	// its rowid is in the range and its time is before `at`.
+	// grace holds the rows with an `at` test. An entry takes the j of a grace
+	// row when its rowid is in the range. Its time must also be before `at`.
 	grace []graceRow
 	// low is the smallest sum that any row can get, at most 0. It takes each
 	// negative j of a grace row as if its test were true.

@@ -536,8 +536,9 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	return err
 }
 
-// movesEnd tells if a batch of recs moves a range end. Then the transaction
-// writes the key, so the pragma is FULL before the BEGIN (see transact).
+// movesEnd tells if a batch of recs can move a range end. Then the transaction
+// can write the key, so the pragma is FULL before the BEGIN (see transact). A
+// batch whose evidence rows are not stored can set FULL with no key write.
 func (w *Writer) movesEnd(recs []event.Record) bool {
 	if w.clk == nil {
 		return false

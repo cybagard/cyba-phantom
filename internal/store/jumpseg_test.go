@@ -112,8 +112,9 @@ var corrCases = []corrCase{
 	{name: "event delete", days: 90, corrected: true, seed: seedEvent("request"), bulk: bulkEvent("request"),
 		acted: rowGone("event", "id"), mk: func() retentionStep { return newEventExpireStep(rollTDel, 90) },
 		setup: func(tb testing.TB, db *sql.DB) { mustExec(tb, db, metaSetSQL, rollupDoneKey, "9999-12-31") }},
-	// The session delete has no bulk. A row costs 4 of the limit, so the tests
-	// of the read bound do not fit it. A test of its cost covers it.
+	// The session delete has no bulk. A row costs 4 of the limit, so the
+	// tests of the read bound do not fit the step. A test of its cost covers
+	// the step.
 	{name: "session delete", days: 90, corrected: true, session: true, seed: seedSession,
 		acted: rowGone("session", "rowid"), mk: func() retentionStep { return newJumpSessionExpireStep(rollTDel, 90) }},
 	{name: "token delete", days: 90, acted: rowGone("token", "session_id"),
