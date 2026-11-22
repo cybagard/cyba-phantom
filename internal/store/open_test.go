@@ -179,10 +179,10 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 	wantRule(t, err, "Z09", ruleParent)
 }
 
-// T-S-15: a reserved directory of the caller with a byte outside A-Z a-z 0-9 . _
-// - is refused as "reserved directory", before any compare and also when
-// store.path does not match it. No file changes. The rule is ruleChars, or
-// rulePathForm where fs.ValidPath refuses the entry first.
+// T-S-15: Open refuses a reserved directory with a byte outside the permitted
+// set as "reserved directory". It does so before any compare, and also when
+// store.path does not match the entry. No file changes. The rule is ruleChars,
+// or rulePathForm where fs.ValidPath refuses the entry first.
 func TestTS15ReservedDirectoryCharsAreRefused(t *testing.T) {
 	root, state, outside := newState(t)
 	before := snapshot(t, state) + snapshot(t, outside)
@@ -193,8 +193,9 @@ func TestTS15ReservedDirectoryCharsAreRefused(t *testing.T) {
 			c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' {
 			continue
 		}
-		// The byte is in the first part, and in the second part of a two-part entry.
-		for _, e := range []string{"x" + string([]byte{byte(b)}) + "y", "bundle/x" + string([]byte{byte(b)})} {
+		// The byte is in a one-part entry and in the second part of another.
+		bs := string([]byte{byte(b)})
+		for _, e := range []string{"x" + bs + "y", "bundle/x" + bs} {
 			rule := ruleChars
 			if !fs.ValidPath(e) { // for example, a byte that is not valid UTF-8
 				rule = rulePathForm
@@ -202,7 +203,7 @@ func TestTS15ReservedDirectoryCharsAreRefused(t *testing.T) {
 			cases = append(cases, refusal{e, rule})
 		}
 	}
-	// U+017F (long s) and U+212A (Kelvin sign) look like ASCII letters in a fold.
+	// U+017F (long s) and U+212A (Kelvin sign) fold to ASCII letters in Unicode.
 	for _, e := range []string{"tlo\xc5\xbf", "\xe2\x84\xaaibana", "bundle/\xe2\x84\xaa"} {
 		cases = append(cases, refusal{e, ruleChars})
 	}

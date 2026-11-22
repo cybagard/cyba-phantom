@@ -56,9 +56,9 @@ func TestTU24KnownAnswers(t *testing.T) {
 	}
 }
 
-// T-S-22: the session id input has the key length byte. The IPv4 key 32.1.13.184
-// with a JA4 text of 12 NUL bytes and "x" makes the same bytes as the IPv6 key
-// 2001:db8:: with the JA4 text "x", if the length byte is left out.
+// T-S-22: the session id input has the key length byte. Without it, the IPv4
+// key 32.1.13.184 with a JA4 text of 12 NUL bytes and "x" makes the same bytes
+// as the IPv6 key 2001:db8:: with the JA4 text "x".
 func TestTS22SessionIDKeyLengthByte(t *testing.T) {
 	k := seqKey()
 	v4, v6 := "32.1.13.184", "2001:db8::1"

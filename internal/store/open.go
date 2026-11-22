@@ -63,9 +63,9 @@ type Options struct {
 	// between its parts. Open refuses any other byte as "reserved directory",
 	// also when store.path does not match the entry. The store adds the fixed
 	// directories keys and checkpoints itself. It also adds the fixed names
-	// checkpoint.state, checkpoint.state.tmp and writer.stop (ADR-020, ADR-022).
-	// The match changes A-Z to a-z in the path and in each reserved path. No
-	// other byte changes. The store does not import internal/config.
+	// checkpoint.state, checkpoint.state.tmp and writer.stop (ADR-020,
+	// ADR-022). The match changes A-Z to a-z in the path and in each reserved
+	// path. No other byte changes. The store does not import internal/config.
 	Reserved []string
 }
 

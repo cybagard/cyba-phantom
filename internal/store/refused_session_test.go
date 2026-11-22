@@ -77,8 +77,8 @@ func (r *rig) refusedIDs(w *Writer, ja4 string, ips ...string) []string {
 }
 
 // wantID is the session id by the definition. It is the first 16 bytes of the
-// HMAC over the prefix, 0x00, the key length as one byte, the key bytes and the
-// JA4 text.
+// HMAC. The input is the prefix, 0x00, the key length as one byte, the key
+// bytes and the JA4 text.
 func wantID(key [32]byte, k []byte, ja4 string) string {
 	m := hmac.New(sha256.New, key[:])
 	m.Write([]byte("phantom-session-v1"))
