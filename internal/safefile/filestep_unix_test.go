@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -26,18 +27,22 @@ func openTemp(t *testing.T) *os.File {
 // isClosed is true when the descriptor of f is closed.
 func isClosed(f *os.File) bool { return errors.Is(f.Close(), os.ErrClosed) }
 
-// steps records each call of the Step hook and gives err for the step.
-func steps(t *testing.T, only string, err error) *[][2]string {
+// stepCall is one call of the Step hook.
+type stepCall struct{ step, name string }
+
+// steps records each call of the Step hook and gives err for the step. The
+// returned function gives the calls so far.
+func steps(t *testing.T, only string, err error) func() []stepCall {
 	t.Helper()
-	var seen [][2]string
+	var seen []stepCall
 	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
-		seen = append(seen, [2]string{step, name})
+		seen = append(seen, stepCall{step, name})
 		if step == only {
 			return err
 		}
 		return nil
 	}})
-	return &seen
+	return func() []stepCall { return seen }
 }
 
 func TestTS38_SyncFileAndCloseFileNoHook(t *testing.T) {
@@ -62,9 +67,9 @@ func TestTS38_SyncFileAndCloseFileRunOneStep(t *testing.T) {
 	if err := CloseFile(f, "b.db"); err != nil {
 		t.Fatal(err)
 	}
-	want := [][2]string{{"sync", "a.db"}, {"close", "b.db"}}
-	if len(*seen) != 2 || (*seen)[0] != want[0] || (*seen)[1] != want[1] {
-		t.Errorf("steps = %q, want %q", *seen, want)
+	want := []stepCall{{"sync", "a.db"}, {"close", "b.db"}}
+	if got := seen(); !slices.Equal(got, want) {
+		t.Errorf("steps = %q, want %q", got, want)
 	}
 }
 
@@ -112,18 +117,36 @@ func TestTS38_SyncFileHookCannotMakeFailedSyncPass(t *testing.T) {
 
 func TestTS38_CloseFileClosesOnEveryPath(t *testing.T) {
 	for _, c := range []struct {
-		name string
-		hook error
-		is   error // nil: CloseFile gives nil
+		name   string
+		hook   error
+		panics bool  // the hook panics and the test recovers
+		is     error // nil: CloseFile gives nil
 	}{
-		{"no hook error", nil, nil},
-		{"hook error", syscall.EIO, ErrClose},
-		{"crash", safefiletest.Crash, safefiletest.Crash},
+		{"no hook error", nil, false, nil},
+		{"hook error", syscall.EIO, false, ErrClose},
+		{"crash", safefiletest.Crash, false, safefiletest.Crash},
+		{"hook panic", nil, true, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := openTemp(t)
-			steps(t, "close", c.hook)
-			err := CloseFile(f, secret)
+			safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+				if step != "close" {
+					return nil
+				}
+				if c.panics {
+					panic("hook panic")
+				}
+				return c.hook
+			}})
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); c.panics != (r != nil) {
+						t.Errorf("recover = %v, want a panic: %v", r, c.panics)
+					}
+				}()
+				err = CloseFile(f, secret)
+			}()
 			if c.is == nil && err != nil || c.is != nil && !errors.Is(err, c.is) {
 				t.Errorf("err = %v, want %v", err, c.is)
 			}
