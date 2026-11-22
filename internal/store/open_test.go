@@ -203,7 +203,7 @@ func TestTS15ReservedDirectoryCharsAreRefused(t *testing.T) {
 			cases = append(cases, refusal{e, rule})
 		}
 	}
-	// U+017F (long s) and U+212A (Kelvin sign) fold to ASCII letters in Unicode.
+	// U+017F (long s) and U+212A (Kelvin sign) fold to ASCII letters.
 	for _, e := range []string{"tlo\xc5\xbf", "\xe2\x84\xaaibana", "bundle/\xe2\x84\xaa"} {
 		cases = append(cases, refusal{e, ruleChars})
 	}
