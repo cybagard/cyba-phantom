@@ -260,7 +260,8 @@ func WriteTemp(root *os.Root, name string, data []byte, w WriteRule) (string, er
 // w.NoDirSync. A failure before the rename keeps the old file. An error that
 // matches ErrMayBeRenamed can leave the new file in place. ErrCheck holds the
 // error of w.Check as its cause. A top-level path error or link error keeps
-// only its system error.
+// only its system error. The error then also matches each error that the
+// check error wraps, for example ErrRule or ErrName.
 func Replace(root *os.Root, name string, data []byte, w WriteRule) error {
 	_, err := write(root, name, data, w, true)
 	return err
