@@ -158,14 +158,15 @@ because the extension mounts the same volume. The container mounts the volume
 read-only. Before you remove the volume, remove the dev container: Docker does
 not remove a volume that a container uses. To fetch a new vulnerability
 database copy there, rebuild the container without the build cache. The Dev
-Containers path was not tested with the network cut.)
+Containers path was not tested end to end.)
 
 Two steps need the network: the module download and the fetch of the
 vulnerability database copy. Both run before the container starts. The first
 `docker run` fills the volume with the modules. The image build fetches the
 database copy, and `make check` reads it from the image. Each make target ran
 with the network cut and the volume read-only, and made no network request.
-`make fill` and `make coldstart` also need the setup that is named below.
+Some targets need more setup, for example `make fill` and `make coldstart`
+(below).
 
 `make all` runs build, lint, `go mod tidy -diff`, the coverage gate and
 `make perf`. The coverage gate runs
