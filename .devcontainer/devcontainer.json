@@ -4,5 +4,10 @@
     "dockerfile": "Dockerfile"
   },
   "workspaceFolder": "/src",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/src,type=bind"
+  "workspaceMount": "source=${localWorkspaceFolder},target=/src,type=bind",
+  "runArgs": ["--network=none"],
+  "init": true,
+  "mounts": [
+    "source=cyba-phantom-modules,target=/go/pkg/mod,type=volume,readonly"
+  ]
 }

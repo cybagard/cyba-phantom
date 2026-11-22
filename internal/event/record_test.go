@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -21,7 +22,7 @@ import (
 
 // largestRecord is the length of the largest canonical record, as measured by
 // TestTS12_LargestEvent. That test builds the record.
-const largestRecord = 11428
+const largestRecord = 10788
 
 func sp(s string) *string { return &s }
 
@@ -234,7 +235,8 @@ func TestTS12_StringConstruction(t *testing.T) {
 			t.Errorf("%s: length %d", name, len(got))
 		}
 	}
-	e := mustEvent(t, Input{Kind: KindRequest, Vhost: long, Path: long, Surface: SurfaceBody, JA4: long})
+	e := mustEvent(t, Input{Kind: KindRequest, Vhost: long, Path: long, Surface: SurfaceBody,
+		JA4: strings.Repeat("a", 5000)})
 	if rec := e.Record(); len(*rec.Vhost) != 252 || len(*rec.Path) != 2048 || len(*rec.FP.JA4) != 128 {
 		t.Error("caps are not applied in the constructor")
 	}
@@ -481,13 +483,118 @@ func TestTS12_IPMarkers(t *testing.T) {
 func TestTS12_RequestContentCopied(t *testing.T) {
 	const m = "203.0.113.7"
 	e := mustEvent(t, Input{Kind: KindCallback, Session: m, Vhost: m, Method: m, Path: "/" + m, TrapID: m,
-		TokenID: m, JA4: m, H2: m, Hdr: m, Detail: Detail{"src": Str(m)}})
+		TokenID: m, JA4: "t13d", H2: m, Hdr: m, Detail: Detail{"src": Str(m)}})
 	b, err := e.record.canonical()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(b), m); n != 10 {
-		t.Errorf("marker is %d times in %s, want 10", n, b)
+	if n := strings.Count(string(b), m); n != 9 {
+		t.Errorf("marker is %d times in %s, want 9", n, b)
+	}
+	if !strings.Contains(string(b), `"ja4":"t13d"`) {
+		t.Errorf("no ja4 member with t13d in %s", b)
+	}
+}
+
+// inJA4Set is the reference of the JA4 byte set. It does not call validJA4.
+func inJA4Set(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
+// ja4Kinds has one base input and its record for each of the 8 kinds that hold
+// fp.ja4. The base is valid when JA4 is valid. Event construction refuses a JA4
+// in a retention event, so that kind is not here. The session id of a refused
+// event comes from its client key and its JA4 text.
+var ja4Kinds = []struct {
+	name string
+	in   Input
+	rec  Record
+}{
+	{"request", Input{Kind: KindRequest}, Record{Kind: KindRequest}},
+	{"callback", Input{Kind: KindCallback}, Record{Kind: KindCallback}},
+	{"beacon", Input{Kind: KindBeacon}, Record{Kind: KindBeacon}},
+	{"score_change", Input{Kind: KindScoreChange}, Record{Kind: KindScoreChange}},
+	{"bundle_load", Input{Kind: KindBundleLoad}, Record{Kind: KindBundleLoad}},
+	{"bundle_rejected", Input{Kind: KindBundleRejected}, Record{Kind: KindBundleRejected}},
+	{"alert_sent", Input{Kind: KindAlertSent}, Record{Kind: KindAlertSent}},
+	{"refused", Input{Kind: KindRefused, Reason: ReasonBadHello, ClientIP: "192.0.2.7"},
+		Record{Kind: KindRefused, Detail: Detail{"reason": Str("bad_hello")}}},
+}
+
+// ja4Refused tests that NewEvent and Record.check both refuse the JA4 value v
+// with errJA4Bytes, for each kind.
+func ja4Refused(t *testing.T, name, v string) {
+	t.Helper()
+	for _, k := range ja4Kinds {
+		in, rec := k.in, k.rec
+		in.JA4, rec.FP = v, &FP{JA4: &v}
+		if e, err := NewEvent(fixedClock(1), in); !errors.Is(err, errJA4Bytes) || e != nil {
+			t.Errorf("%s, %s: NewEvent gives %v, %v, want errJA4Bytes and no event", name, k.name, e, err)
+		}
+		if err := rec.check(); !errors.Is(err, errJA4Bytes) {
+			t.Errorf("%s, %s: the record check gives %v, want errJA4Bytes", name, k.name, err)
+		}
+	}
+}
+
+// T-S-12: an fp.ja4 with a byte outside A-Z a-z 0-9 and _ is an error. Event
+// construction and the record check both refuse it. Neither path repairs it.
+// The control value "t13d" passes both paths for each kind.
+func TestTS12_JA4BytesRefused(t *testing.T) {
+	good := "t13d"
+	for _, k := range ja4Kinds {
+		in, rec := k.in, k.rec
+		in.JA4, rec.FP = good, &FP{JA4: &good}
+		if _, err := NewEvent(fixedClock(1), in); err != nil {
+			t.Errorf("%s: control: NewEvent: %v", k.name, err)
+		}
+		if err := rec.check(); err != nil {
+			t.Errorf("%s: control: record check: %v", k.name, err)
+		}
+	}
+	ok := strings.Repeat("a", capFP)
+	for name, v := range map[string]string{
+		"NUL": "\x00", "space": " ", "hyphen": "-", "e acute": "é", "0xff": "\xff",
+		"dot": "t13d.", "byte 129": ok + "-", "byte 129 NUL": ok + "\x00",
+		"byte 129 0xff": ok + "\xff",
+	} {
+		ja4Refused(t, name, v)
+	}
+	for c := range 256 {
+		if inJA4Set(byte(c)) {
+			continue
+		}
+		ja4Refused(t, fmt.Sprintf("byte %#x alone", c), string([]byte{byte(c)}))
+		ja4Refused(t, fmt.Sprintf("byte %#x inside", c), "t13d"+string([]byte{byte(c)})+"h2")
+	}
+}
+
+// T-S-12: a value with each of A-Z a-z 0-9 and _ is accepted, and the record
+// holds the same bytes. The check allocates nothing.
+func TestTS12_JA4BytesAccepted(t *testing.T) {
+	var all strings.Builder
+	for c := range 256 {
+		if inJA4Set(byte(c)) {
+			all.WriteByte(byte(c))
+		}
+	}
+	v := all.String()
+	if len(v) != 63 {
+		t.Fatalf("the set has %d characters, want 63", len(v))
+	}
+	e, err := NewEvent(fixedClock(1), Input{Kind: KindRequest, JA4: v})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := e.Record(); rec.FP == nil || rec.FP.JA4 == nil || *rec.FP.JA4 != v {
+		t.Errorf("the record does not hold %q", v)
+	}
+	r := Record{Kind: KindRequest, FP: &FP{JA4: &v}}
+	if err := r.check(); err != nil {
+		t.Error(err)
+	}
+	if n := testing.AllocsPerRun(100, func() { _ = r.check() }); n != 0 {
+		t.Errorf("the record check makes %v allocations, want 0", n)
 	}
 }
 
@@ -689,7 +796,7 @@ func TestTS12_LargestEvent(t *testing.T) {
 	} {
 		e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
 			Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
-			Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+			Surface: SurfaceHeader, JA4: strings.Repeat("a", capFP), H2: ctl, Hdr: ctl,
 			Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
 			ClientIP: c.ip, BodyPrefix: make([]byte, 9000)})
 		if err != nil {

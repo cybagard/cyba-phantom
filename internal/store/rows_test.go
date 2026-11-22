@@ -203,7 +203,7 @@ func TestTU18StoredRecordAndHashAreTheCanonicalBytes(t *testing.T) {
 	ctl := strings.Repeat("\x01", 300)
 	batch = append(batch, mk(event.Input{Kind: event.KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
 		Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
-		Surface: event.SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+		Surface: event.SurfaceHeader, JA4: strings.Repeat("a", 128), H2: ctl, Hdr: ctl,
 		Detail: event.Detail{"a": event.Str(strings.Repeat("\x01", 340))}}, long))
 	r := newRig(t, 100)
 	if err := r.w.write(batch); err != nil {
