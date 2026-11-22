@@ -67,7 +67,21 @@ var (
 	serveSetup = func(p startParams) (startParams, startDeps) { return p, realDeps }
 )
 
-// serveWith runs the sensor on the state of p until ctx ends.
+// serveArgs holds the values of serveWith, other than its context.
+// Set stop, cfg, d, stdout and stderr. A zero value of one of them can
+// cause a panic. serveWith calls stop when ctx ends and when a serve call
+// fails. A signal on hup asks for a bundle load.
+type serveArgs struct {
+	stop           context.CancelFunc
+	hup            <-chan os.Signal
+	cfg            *config.Config
+	c              content
+	p              startParams
+	d              startDeps
+	stdout, stderr io.Writer
+}
+
+// serveWith runs the sensor on the state of a.p until ctx ends.
 // The start checks the CPU for hardware AES first. With none, it writes one
 // fixed warning line, sets the health flag, and goes on (SEC-33).
 // The start order is: the queue, the two listen sockets, the store part,
@@ -78,12 +92,12 @@ var (
 // Then: WarnExpiry, when there is a static entry.
 // Then: the serve calls.
 // serveNames gives the decoy names.
-// c holds the parsed static certificates and roots.
+// a.c holds the parsed static certificates and roots.
 // With no acme.names entry, no cache opens and no client starts.
-// A static name gets its certificate from c.
+// A static name gets its certificate from a.c.
 // When the client is absent, an ACME name fails with errNoClient.
 // It records no gate reason. A static name is still served.
-// WarnExpiry runs with ctx when c holds a static certificate.
+// WarnExpiry runs with ctx when a.c holds a static certificate.
 // A bind error ends the start before the store part opens a file.
 // The stop is the reverse. Both serve calls return. Then the client stops, the cache closes,
 // and the store part closes the queue. Thus no handler adds an event to a closed queue.
@@ -93,10 +107,11 @@ var (
 // A queue error, a bind error, or a decoy server that does not start
 // gives exit 1 at once.
 // A serve call that ends with an error also gives exit 1, after the stop.
-// A signal on hup, a SIGHUP, asks for one bundle load with the source signal.
-// A signal that comes during the start waits on hup until the serve calls run.
+// A signal on a.hup, a SIGHUP, asks for one bundle load with the source
+// signal. A signal that comes during the start waits on a.hup until the
+// serve calls run.
 // Signals that come during a load give at most one more load.
-// A nil hup gives none.
+// A nil a.hup gives none.
 // The reload goroutine is in wg, so it ends before the queue closes.
 // After the stop began, the goroutine starts no new load.
 // A load in its wait for the swap gap at the stop ends the wait at once.
@@ -108,8 +123,10 @@ var (
 // load. A fetch load in its wait for the swap gap at the stop does not start.
 // A fetch load that has started runs to its end. A newFetcher
 // error gives one fixed line.
-// stop is the cancel function of ctx.
-func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signal, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
+// serve sets a.stop to the cancel function of ctx.
+func serveWith(ctx context.Context, a serveArgs) int {
+	stop, hup, cfg, c, p, d := a.stop, a.hup, a.cfg, a.c, a.p, a.d
+	stdout, stderr := a.stdout, a.stderr
 	noAES := checkAES(stderr)
 	counters := event.NewCounters()
 	depth := cfg.Must("limits.queue_depth")
