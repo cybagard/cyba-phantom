@@ -502,9 +502,9 @@ func inJA4Set(b byte) bool {
 }
 
 // ja4Kinds has one base input and its record for each of the 8 kinds that hold
-// fp.ja4. The base is valid when JA4 is valid. The retention kind refuses a
-// JA4, so it is not here. A refused event has a session id made from its JA4
-// text.
+// fp.ja4. The base is valid when JA4 is valid. Event construction refuses a JA4
+// in a retention event, so that kind is not here. The session id of a refused
+// event comes from its client key and its JA4 text.
 var ja4Kinds = []struct {
 	name string
 	in   Input
