@@ -169,7 +169,8 @@ func seamsOf(t *testing.T) *seams {
 // openListeners opens the https and the http listener on a loopback port. It keeps them open until the test
 // ends. It sets the listen seam of t (see seamsOf).
 // A listen call for the address of one of them gives that
-// listener. Any other address goes to the real listen. So no port is closed and bound again.
+// listener. Any other address goes to the earlier listen seam of t, or to the
+// default. So no port is closed and bound again.
 // It also gives an address for the ACME CA. The host is a name below .invalid.
 // RFC 6761 reserves that name, but Go still looks it up. On Linux, Go asks
 // for A and AAAA, for the name and for the name with each search domain.

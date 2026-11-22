@@ -53,8 +53,8 @@ const shutdownTime = 5 * time.Second
 // The wait starts after the servers stopped.
 const closeTime = 1500 * time.Millisecond
 
-// The default seams of serveWith. They are package variables until a later
-// change. seams.orDefault reads them at each call.
+// The default seams of serveWith. Some test files set them.
+// seams.orDefault reads them at each call.
 var (
 	newServer = listener.New
 	newACME   = listener.NewACME
