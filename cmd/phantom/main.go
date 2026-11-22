@@ -88,15 +88,22 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 }
 
 // serve runs the sensor until SIGINT or SIGTERM (see serveWith). A test replaces it.
-// serve sets the signal handlers before the start, so it catches a signal
-// during the start. A SIGHUP asks for a bundle load (see serveWith).
+// It runs serveOn with the default seams.
 var serve = func(cfg *config.Config, c content, stdout, stderr io.Writer) int {
+	return serveOn(seams{}, cfg, c, stdout, stderr)
+}
+
+// serveOn is serve with the seams sm. A nil field of sm gives the default step.
+// It sets the signal handlers before the start, so it catches a signal
+// during the start. A SIGHUP asks for a bundle load (see serveWith).
+func serveOn(sm seams, cfg *config.Config, c content, stdout, stderr io.Writer) int {
+	sm = sm.orDefault()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	hup := notifyReload()
 	defer signal.Stop(hup)
-	p, d := serveSetup(paramsOf(cfg))
-	return serveWith(ctx, serveArgs{stop: stop, hup: hup, cfg: cfg, c: c, p: p, d: d, stdout: stdout, stderr: stderr})
+	p, d := sm.serveSetup(paramsOf(cfg))
+	return serveWith(ctx, serveArgs{seams: sm, stop: stop, hup: hup, cfg: cfg, c: c, p: p, d: d, stdout: stdout, stderr: stderr})
 }
 
 // printPrivateLists writes one line for each entry of each private list.

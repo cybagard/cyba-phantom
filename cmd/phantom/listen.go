@@ -53,7 +53,8 @@ const shutdownTime = 5 * time.Second
 // The wait starts after the servers stopped.
 const closeTime = 1500 * time.Millisecond
 
-// The seams of serveWith. A test replaces them to see the order of the start and the stop.
+// The default seams of serveWith. Some test files set them.
+// seams.orDefault reads them at each call.
 var (
 	newServer = listener.New
 	newACME   = listener.NewACME
@@ -67,11 +68,62 @@ var (
 	serveSetup = func(p startParams) (startParams, startDeps) { return p, realDeps }
 )
 
+// seams holds the steps of serveWith that a test replaces. A test replaces
+// them to see the order of the start and the stop. A nil field gives the
+// default step (see orDefault).
+type seams struct {
+	newServer func(listener.Config, http.Handler) (*listener.Server, error)
+	newACME   func(listener.ACMEParams) (*listener.ACME, error)
+	startACME func(context.Context, *listener.ACME) error
+	stopACME  func(*listener.ACME)
+	warnCerts func(*listener.CertSource, context.Context, *slog.Logger)
+	served    func() // runs after Serve or ServePlain returned
+	listen    func(network, addr string) (net.Listener, error)
+	waitStop  func(context.Context) // serve waits here until the stop
+	// serveSetup gives serve the start values and the parts of the store start.
+	serveSetup func(startParams) (startParams, startDeps)
+}
+
+// orDefault returns s with the default step in each nil field. It reads the
+// package variables at the time of the call, not before.
+func (s seams) orDefault() seams {
+	if s.newServer == nil {
+		s.newServer = newServer
+	}
+	if s.newACME == nil {
+		s.newACME = newACME
+	}
+	if s.startACME == nil {
+		s.startACME = startACME
+	}
+	if s.stopACME == nil {
+		s.stopACME = stopACME
+	}
+	if s.warnCerts == nil {
+		s.warnCerts = warnCerts
+	}
+	if s.served == nil {
+		s.served = served
+	}
+	if s.listen == nil {
+		s.listen = listen
+	}
+	if s.waitStop == nil {
+		s.waitStop = waitStop
+	}
+	if s.serveSetup == nil {
+		s.serveSetup = serveSetup
+	}
+	return s
+}
+
 // serveArgs holds the values of serveWith, other than its context.
 // Set stop, cfg, d, stdout and stderr. A zero value of one of them can
 // cause a panic. serveWith calls stop when ctx ends and when a serve call
-// fails. A signal on hup asks for a bundle load.
+// fails. A signal on hup asks for a bundle load. A nil field of seams gives
+// the default step.
 type serveArgs struct {
+	seams          seams
 	stop           context.CancelFunc
 	hup            <-chan os.Signal
 	cfg            *config.Config
@@ -125,6 +177,7 @@ type serveArgs struct {
 // error gives one fixed line.
 // serve sets a.stop to the cancel function of ctx.
 func serveWith(ctx context.Context, a serveArgs) int {
+	sm := a.seams.orDefault()
 	stop, hup, cfg, c, p, d := a.stop, a.hup, a.cfg, a.c, a.p, a.d
 	stdout, stderr := a.stdout, a.stderr
 	noAES := checkAES(stderr)
@@ -135,7 +188,7 @@ func serveWith(ctx context.Context, a serveArgs) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	httpsLn, httpLn, ok := bindBoth(cfg, stderr)
+	httpsLn, httpLn, ok := bindBoth(sm, cfg, stderr)
 	if !ok {
 		return 1
 	}
@@ -143,7 +196,7 @@ func serveWith(ctx context.Context, a serveArgs) int {
 	s := start(p, q, d, lg)
 	if line := s.refusal(); line != "" {
 		fmt.Fprintln(stderr, line)
-		abortStart(httpsLn, httpLn, nil, nil, s)
+		abortStart(sm, httpsLn, httpLn, nil, nil, s)
 		return 1
 	}
 	b := startBundle(p, s, q, lg)
@@ -154,7 +207,7 @@ func serveWith(ctx context.Context, a serveArgs) int {
 	var acme *listener.ACME         // nil when the client does not exist
 	var source *listener.CertSource // set before the serve calls
 	// The handshake runs only after Serve, which starts after source is set.
-	srv, err := newServer(listener.Config{
+	srv, err := sm.newServer(listener.Config{
 		TLS: &tls.Config{GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if acme == nil {
 				// A name that normalName refuses is no ACME name.
@@ -172,7 +225,7 @@ func serveWith(ctx context.Context, a serveArgs) int {
 	}, decoyHandler(cfg, b, s, q, decoys))
 	if err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
-		abortStart(httpsLn, httpLn, nil, nil, s)
+		abortStart(sm, httpsLn, httpLn, nil, nil, s)
 		return 1
 	}
 	// certmagic writes with the standard log package. Serve drops the text and
@@ -180,18 +233,18 @@ func serveWith(ctx context.Context, a serveArgs) int {
 	log.SetOutput(io.Discard)
 	certLine := ""
 	if len(names) > 0 {
-		cache, acme, certLine = startCerts(ctx, cfg, c, p, s, names, httpsLn, stderr)
+		cache, acme, certLine = startCerts(ctx, sm, cfg, c, p, s, names, httpsLn, stderr)
 	}
 	if certLine != "" {
 		fmt.Fprintln(stderr, certLine)
 	}
 	if source, err = listener.NewCertSource(c.static, acme); err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
-		abortStart(httpsLn, httpLn, acme, cache, s)
+		abortStart(sm, httpsLn, httpLn, acme, cache, s)
 		return 1
 	}
 	if len(c.static) > 0 {
-		warnCerts(source, ctx, slog.New(slog.NewTextHandler(stderr, nil)))
+		sm.warnCerts(source, ctx, slog.New(slog.NewTextHandler(stderr, nil)))
 	}
 	var wg sync.WaitGroup
 	var failed atomic.Bool // a serve call ended with an error: the exit code is 1, so a supervisor restarts the sensor
@@ -202,7 +255,7 @@ func serveWith(ctx context.Context, a serveArgs) int {
 				failed.Store(true)
 				stop()
 			}
-			served()
+			sm.served()
 		})
 	}
 	// The fetcher and the watch start here. This is after the start load.
@@ -215,11 +268,11 @@ func serveWith(ctx context.Context, a serveArgs) int {
 	// starts it thus reaches wg.Wait before s.Stop().
 	wg.Go(func() { b.reloadOnSignal(ctx, hup) })
 	fmt.Fprintln(stdout, startLine(s, b, noAES, certLine, acme != nil))
-	waitStop(ctx)
+	sm.waitStop(ctx)
 	stop() // A second signal during the stop gets the default action.
 	shutdownServers(srv)
 	wg.Wait()
-	if !closeBounded(stderr, clientStop(acme), cache, s) || failed.Load() {
+	if !closeBounded(stderr, clientStop(sm, acme), cache, s) || failed.Load() {
 		return 1
 	}
 	return 0
@@ -251,10 +304,10 @@ func decoyHandler(cfg *config.Config, b *bundlePart, s *storePart, q *event.Queu
 
 // bindBoth binds listen.https and then listen.http. On an error it writes one fixed line that names the
 // key and no value, closes the socket that it bound, and returns false.
-func bindBoth(cfg *config.Config, stderr io.Writer) (https, plain net.Listener, ok bool) {
+func bindBoth(sm seams, cfg *config.Config, stderr io.Writer) (https, plain net.Listener, ok bool) {
 	var lns []net.Listener
 	for _, k := range []string{"listen.https", "listen.http"} {
-		ln, err := listen("tcp", cfg.Must(k).Str)
+		ln, err := sm.listen("tcp", cfg.Must(k).Str)
 		if err != nil {
 			fmt.Fprintf(stderr, "phantom: cannot bind %s\n", k)
 			for _, l := range lns {
