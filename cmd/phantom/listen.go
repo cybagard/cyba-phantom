@@ -68,11 +68,13 @@ var (
 )
 
 // serveArgs holds the values of serveWith, other than its context.
+// Set stop, cfg, stdout and stderr: serveWith does not check them for nil.
+// serveWith calls stop at the stop. A signal on hup asks for a bundle load.
 type serveArgs struct {
-	stop           context.CancelFunc // the cancel function of the context
-	hup            <-chan os.Signal   // asks for a bundle load; nil gives none
+	stop           context.CancelFunc
+	hup            <-chan os.Signal
 	cfg            *config.Config
-	c              content // the parsed static certificates and roots
+	c              content
 	p              startParams
 	d              startDeps
 	stdout, stderr io.Writer
@@ -120,7 +122,7 @@ type serveArgs struct {
 // load. A fetch load in its wait for the swap gap at the stop does not start.
 // A fetch load that has started runs to its end. A newFetcher
 // error gives one fixed line.
-// a.stop is the cancel function of ctx.
+// serve sets a.stop to the cancel function of ctx.
 func serveWith(ctx context.Context, a serveArgs) int {
 	stop, hup, cfg, c, p, d := a.stop, a.hup, a.cfg, a.c, a.p, a.d
 	stdout, stderr := a.stdout, a.stderr

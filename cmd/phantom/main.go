@@ -96,8 +96,7 @@ var serve = func(cfg *config.Config, c content, stdout, stderr io.Writer) int {
 	hup := notifyReload()
 	defer signal.Stop(hup)
 	p, d := serveSetup(paramsOf(cfg))
-	return serveWith(ctx, serveArgs{stop: stop, hup: hup, cfg: cfg, c: c,
-		p: p, d: d, stdout: stdout, stderr: stderr})
+	return serveWith(ctx, serveArgs{stop: stop, hup: hup, cfg: cfg, c: c, p: p, d: d, stdout: stdout, stderr: stderr})
 }
 
 // printPrivateLists writes one line for each entry of each private list.
