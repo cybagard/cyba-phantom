@@ -6,11 +6,8 @@
   "workspaceFolder": "/src",
   "workspaceMount": "source=${localWorkspaceFolder},target=/src,type=bind",
   "runArgs": ["--network=none"],
+  "init": true,
   "mounts": [
-    {
-      "source": "cyba-phantom-gomod",
-      "target": "/go/pkg/mod",
-      "type": "volume"
-    }
+    "source=cyba-phantom-modules,target=/go/pkg/mod,type=volume,readonly"
   ]
 }
