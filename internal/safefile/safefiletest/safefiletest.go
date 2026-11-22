@@ -10,6 +10,10 @@ import (
 // Hooks is the set of test hooks of package safefile.
 type Hooks = seam.Hooks
 
+// Crash is the result of a Step hook that stops a write at once, as a crash
+// does. A write that gets it returns an error that matches Crash.
+var Crash = seam.Crash
+
 // Set installs h for t and removes it in t.Cleanup. It fails t when the
 // binary is not a test binary or when a set is already active.
 func Set(t testing.TB, h Hooks) {

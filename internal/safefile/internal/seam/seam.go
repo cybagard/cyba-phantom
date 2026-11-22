@@ -3,10 +3,17 @@
 // result can make a refused file pass.
 package seam
 
-import "sync/atomic"
+import (
+	"errors"
+	"sync/atomic"
+)
 
 // FileID is the device and inode of a file.
 type FileID struct{ Dev, Ino uint64 }
+
+// Crash is the result of a Step hook that stops the write at once, as a
+// crash does. No later step and no cleanup runs.
+var Crash = errors.New("seam: simulated crash")
 
 // Hooks is one set of test hooks. A nil field is a hook that is off.
 type Hooks struct {
@@ -14,6 +21,12 @@ type Hooks struct {
 	AfterCheck  func(name string)    // between the Lstat and the open
 	AfterOpen   func(name string)    // between the open and the fstat
 	OtherOwner  func(id FileID) bool // true: refuse as another owner
+
+	// Step runs before each step of a write. The step names are "create",
+	// "write", "sync", "close", "check", "rename", "link", "remove" and
+	// "dirsync". An error that is not Crash makes the step fail with that
+	// error. Crash stops the write. The name is the file or directory.
+	Step func(step, name string) error
 }
 
 var current atomic.Pointer[Hooks]
