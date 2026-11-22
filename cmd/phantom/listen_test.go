@@ -266,7 +266,10 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
 	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin, fences: fences}
-	go func() { r.code = serveWith(ctx, cancel, nil, cfg, c, p, d, r.out, &r.err); close(r.done) }()
+	go func() {
+		r.code = serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: c, p: p, d: d, stdout: r.out, stderr: &r.err})
+		close(r.done)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -987,7 +990,7 @@ func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
 		return nil, errors.New("test error")
 	}
 	var q *event.Queue
-	if code := serveWith(t.Context(), func() {}, nil, cfg, content{}, tempState(t, cfg), depsWithQueue(&q), io.Discard, io.Discard); code != 1 {
+	if code := serveWith(t.Context(), serveArgs{stop: func() {}, cfg: cfg, c: content{}, p: tempState(t, cfg), d: depsWithQueue(&q), stdout: io.Discard, stderr: io.Discard}); code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
 	if q == nil || got.Queue != q || got.Counters == nil || !q.Closed() {
@@ -1028,7 +1031,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	p, d := tempState(t, cfg), depsWithDB(depsWithQueue(&q), &db)
 	var stdout, stderr strings.Builder
 	before := goroutineBlocks()
-	code := serveWith(t.Context(), func() {}, nil, cfg, content{}, p, d, &stdout, &stderr)
+	code := serveWith(t.Context(), serveArgs{stop: func() {}, cfg: cfg, c: content{}, p: p, d: d, stdout: &stdout, stderr: &stderr})
 	after := goroutineBlocks()
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: decoy listener does not start\n") || stdout.Len() != 0 {
 		t.Errorf("exit %d, stderr %q, stdout %q; want 1, the fixed line and no stdout", code, stderr.String(), stdout.String())
@@ -1842,7 +1845,7 @@ func TestTS27_StartBadEntry(t *testing.T) {
 	// A start that does not fail ends at the timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
-	if code := serveWith(ctx, cancel, nil, cfg, c, tempState(t, cfg), depsWithQueue(&q), io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
+	if code := serveWith(ctx, serveArgs{stop: cancel, cfg: cfg, c: c, p: tempState(t, cfg), d: depsWithQueue(&q), stdout: io.Discard, stderr: &stderr}); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
 		t.Errorf("exit %d, stderr %q, want exit 1 and the fixed line", code, stderr.String())
 	}
 	if stops.Load() != 1 || closedAtStop || q == nil || !q.Closed() {
