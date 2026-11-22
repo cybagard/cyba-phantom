@@ -195,10 +195,12 @@ func isSepRow(cells []string) bool {
 	return true
 }
 
-// parsePRD collects requirement and goal IDs in declaration order,
-// tracking the nearest heading for the C10 exemption marker.
-func parsePRD(text string, findings *[]string) []req {
+// parsePRD collects requirement and goal IDs in declaration order. It keeps
+// the nearest heading for the C10 exemption marker. It also returns the
+// findings.
+func parsePRD(text string) ([]req, []string) {
 	var reqs []req
+	var findings []string
 	seen := map[string]bool{}
 	heading := ""
 	for _, line := range strings.Split(text, "\n") {
@@ -215,20 +217,21 @@ func parsePRD(text string, findings *[]string) []req {
 			continue
 		}
 		if seen[id] {
-			*findings = append(*findings, fmt.Sprintf("01-prd: duplicate requirement ID %s", id))
+			findings = append(findings, fmt.Sprintf("01-prd: duplicate requirement ID %s", id))
 			continue
 		}
 		seen[id] = true
 		reqs = append(reqs, req{id: id, exempt: strings.Contains(heading, "exempt from C10")})
 	}
-	return reqs
+	return reqs, findings
 }
 
 // parseTestPlan collects test IDs in declaration order with their Covers
-// tokens (cell 2). Rows whose first cell is not a T-ID (layer rows,
-// milestone rows) are ignored.
-func parseTestPlan(text string, findings *[]string) []test {
+// tokens (cell 2). It ignores rows whose first cell is not a T-ID (layer
+// rows, milestone rows). It also returns the findings.
+func parseTestPlan(text string) ([]test, []string) {
 	var tests []test
+	var findings []string
 	seen := map[string]bool{}
 	for _, line := range strings.Split(text, "\n") {
 		cells := splitRow(line)
@@ -240,7 +243,7 @@ func parseTestPlan(text string, findings *[]string) []test {
 		}
 		id := cells[0]
 		if seen[id] {
-			*findings = append(*findings, fmt.Sprintf("07-test-plan: duplicate test ID %s", id))
+			findings = append(findings, fmt.Sprintf("07-test-plan: duplicate test ID %s", id))
 			continue
 		}
 		seen[id] = true
@@ -254,18 +257,19 @@ func parseTestPlan(text string, findings *[]string) []test {
 			case idLikeRE.MatchString(tok):
 				// Looks like an ID but is not one (FR-1, FR-100, C11):
 				// a typo must not drop out of the C10 check.
-				*findings = append(*findings, fmt.Sprintf("07-test-plan: test %s Covers item %d is not a valid requirement ID", id, i+1))
+				findings = append(findings, fmt.Sprintf("07-test-plan: test %s Covers item %d is not a valid requirement ID", id, i+1))
 			}
 		}
 		tests = append(tests, t)
 	}
-	return tests
+	return tests, findings
 }
 
 // parseMatrixFile collects the tables, their rows, and line indices from
-// the committed 08 file.
-func parseMatrixFile(text string, findings *[]string) ([]matRow, []matGroup) {
+// the committed 08 file. It also returns the findings.
+func parseMatrixFile(text string) ([]matRow, []matGroup, []string) {
 	lines := strings.Split(text, "\n")
+	var findings []string
 	var all []matRow
 	var groups []matGroup
 	cur := -1
@@ -284,7 +288,7 @@ func parseMatrixFile(text string, findings *[]string) ([]matRow, []matGroup) {
 			rowOpen = false
 		case len(cells) == 3 && isRowID(cells[0]):
 			if cur < 0 {
-				*findings = append(*findings, fmt.Sprintf("08-traceability: row %s lies outside a table (line %d)", cells[0], i+1))
+				findings = append(findings, fmt.Sprintf("08-traceability: row %s lies outside a table (line %d)", cells[0], i+1))
 				continue
 			}
 			g := &groups[cur]
@@ -318,7 +322,7 @@ func parseMatrixFile(text string, findings *[]string) ([]matRow, []matGroup) {
 			}
 		}
 	}
-	return all, groups
+	return all, groups, findings
 }
 
 // expectedRows returns the canonical row IDs: 01 requirements in
@@ -395,8 +399,10 @@ func setDelta(want, got map[string]bool) (missing, extra []string) {
 // does not declare, in ID order, and the prose tokens, in cell order.
 // reemitTests joins the tokens with ", ". A prose token in a cell that has
 // a test reference is a finding. A cell with no test references (a "no
-// tests" marker) stays as it is.
-func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
+// tests" marker) stays as it is. reemitTests returns the cell and the
+// findings.
+func reemitTests(reqID, cell string, tests []test) (string, []string) {
+	var findings []string
 	testPos := make(map[string]int, len(tests))
 	for _, t := range tests {
 		testPos[t.id] = t.order
@@ -416,7 +422,7 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 		ids := expandOne(part)
 		if ids == nil {
 			if testRefAnywhereRE.MatchString(part) {
-				*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has a malformed test reference (item %d)", reqID, i+1))
+				findings = append(findings, fmt.Sprintf("08-traceability: %s Tests cell has a malformed test reference (item %d)", reqID, i+1))
 			} else {
 				proseItems = append(proseItems, i+1)
 			}
@@ -447,14 +453,14 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 			}
 		}
 		if len(ids) > 1 && !contig {
-			*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell range %s is not contiguous in 07 order", reqID, part))
+			findings = append(findings, fmt.Sprintf("08-traceability: %s Tests cell range %s is not contiguous in 07 order", reqID, part))
 		}
 	}
 	if !hasTest {
-		return cell
+		return cell, findings
 	}
 	for _, n := range proseItems {
-		*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has an item that is not a test reference (item %d)", reqID, n))
+		findings = append(findings, fmt.Sprintf("08-traceability: %s Tests cell has an item that is not a test reference (item %d)", reqID, n))
 	}
 
 	sort.Slice(known, func(i, j int) bool { return known[i].order < known[j].order })
@@ -474,7 +480,7 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	}
 	parts = append(parts, unknown...)
 	parts = append(parts, prose...)
-	return strings.Join(parts, ", ")
+	return strings.Join(parts, ", "), findings
 }
 
 // nextInRun reports if b continues a range that ends with a. A range
@@ -547,12 +553,23 @@ func diffFinding(committed, canonical string) []string {
 	return append([]string{header}, out...)
 }
 
-// buildCanonical re-emits the 08 file: non-row lines pass through, row
-// lines are replaced by the canonical rows in canonical order.
-func buildCanonical(text string, groups []matGroup, expMain, expGoals []string, rows []matRow, tests []test, findings *[]string) string {
+// canonInput holds the values that buildCanonical needs besides the text
+// and the tables. They are the canonical row IDs from 01, the committed
+// rows, and the tests of 07.
+type canonInput struct {
+	expMain, expGoals []string
+	rows              []matRow
+	tests             []test
+}
+
+// buildCanonical re-emits the 08 file: non-row lines pass through, and the
+// canonical rows replace the row lines, in canonical order. It also returns
+// the findings.
+func buildCanonical(text string, groups []matGroup, in canonInput) (string, []string) {
+	var findings []string
 	lines := strings.Split(text, "\n")
-	committed := make(map[string]matRow, len(rows))
-	for _, r := range rows {
+	committed := make(map[string]matRow, len(in.rows))
+	for _, r := range in.rows {
 		committed[r.reqID] = r
 	}
 
@@ -564,14 +581,14 @@ func buildCanonical(text string, groups []matGroup, expMain, expGoals []string, 
 		}
 		kind := classifyTable(g)
 		if kind.mixed() {
-			*findings = append(*findings, fmt.Sprintf("08-traceability: table %d mixes goal and requirement rows", gi+1))
+			findings = append(findings, fmt.Sprintf("08-traceability: table %d mixes goal and requirement rows", gi+1))
 		}
 		var sets [][]string
 		if kind.main || !kind.goals {
-			sets = append(sets, expMain)
+			sets = append(sets, in.expMain)
 		}
 		if kind.goals {
-			sets = append(sets, expGoals)
+			sets = append(sets, in.expGoals)
 		}
 		var rowLines []string
 		for _, set := range sets {
@@ -580,7 +597,8 @@ func buildCanonical(text string, groups []matGroup, expMain, expGoals []string, 
 				if !ok {
 					continue // missing: reported, and the byte compare catches it
 				}
-				cell := reemitTests(id, cr.tests, tests, findings)
+				cell, f := reemitTests(id, cr.tests, in.tests)
+				findings = append(findings, f...)
 				rowLines = append(rowLines, fmt.Sprintf("| %s | %s | %s |", id, cr.design, cell))
 			}
 		}
@@ -600,17 +618,17 @@ func buildCanonical(text string, groups []matGroup, expMain, expGoals []string, 
 		}
 		out = append(out, l)
 	}
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n"), findings
 }
 
 // checkMatrix runs all C10 checks; an empty result means the matrix is
 // in sync.
 func checkMatrix(prd, tp, mat string) []string {
-	var findings []string
-
-	reqs := parsePRD(prd, &findings)
-	tests := parseTestPlan(tp, &findings)
-	rows, groups := parseMatrixFile(mat, &findings)
+	reqs, findings := parsePRD(prd)
+	tests, f := parseTestPlan(tp)
+	findings = append(findings, f...)
+	rows, groups, f := parseMatrixFile(mat)
+	findings = append(findings, f...)
 
 	expMain, expGoals := expectedRows(reqs)
 	expected := make(map[string]bool, len(expMain)+len(expGoals))
@@ -720,7 +738,8 @@ func checkMatrix(prd, tp, mat string) []string {
 	}
 
 	// Byte-exact re-emit.
-	canonical := buildCanonical(mat, groups, expMain, expGoals, rows, tests, &findings)
+	canonical, f := buildCanonical(mat, groups, canonInput{expMain, expGoals, rows, tests})
+	findings = append(findings, f...)
 	if canonical != mat {
 		findings = append(findings, diffFinding(mat, canonical)...)
 	}

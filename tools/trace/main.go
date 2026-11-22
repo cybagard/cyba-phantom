@@ -55,12 +55,34 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-func isMode(s string) bool {
-	return s == "matrix" || s == "stamp" || s == "all" || s == "tests"
+// mode is the check that run does.
+type mode int
+
+const (
+	modeMatrix mode = iota
+	modeStamp
+	modeAll
+	modeTests
+)
+
+// parseMode turns the text of an argument into a mode. It reports false
+// when the text names no mode. It is the only place that reads mode names.
+func parseMode(s string) (mode, bool) {
+	switch s {
+	case "matrix":
+		return modeMatrix, true
+	case "stamp":
+		return modeStamp, true
+	case "all":
+		return modeAll, true
+	case "tests":
+		return modeTests, true
+	}
+	return modeMatrix, false
 }
 
 func run(args []string) int {
-	mode, dir := "matrix", "spec"
+	m, dir := modeMatrix, "spec"
 	write := false
 	milestone := ""
 	var positional []string
@@ -89,37 +111,38 @@ func run(args []string) int {
 	case 0:
 		// defaults
 	case 1:
-		if isMode(positional[0]) {
-			mode = positional[0]
+		if pm, ok := parseMode(positional[0]); ok {
+			m = pm
 		} else {
 			dir = positional[0]
 		}
 	case 2:
-		mode, dir = positional[0], positional[1]
-		if !isMode(mode) {
-			fmt.Fprintf(os.Stderr, "trace: unknown mode %q (want matrix, stamp, all, or tests)\n", mode)
+		pm, ok := parseMode(positional[0])
+		if !ok {
+			fmt.Fprintf(os.Stderr, "trace: unknown mode %q (want matrix, stamp, all, or tests)\n", positional[0])
 			return 2
 		}
+		m, dir = pm, positional[1]
 	default:
 		fmt.Fprintln(os.Stderr, "usage: trace [matrix|stamp|all] [spec-dir] [--write]")
 		fmt.Fprintln(os.Stderr, "       trace tests [spec-dir] --milestone M-n")
 		return 2
 	}
-	if write && mode != "stamp" {
+	if write && m != modeStamp {
 		fmt.Fprintln(os.Stderr, "trace: --write is only valid in stamp mode")
 		return 2
 	}
-	if mode == "tests" && milestone == "" {
+	if m == modeTests && milestone == "" {
 		fmt.Fprintln(os.Stderr, "trace: tests mode needs --milestone M-n")
 		return 2
 	}
-	if mode != "tests" && milestone != "" {
+	if m != modeTests && milestone != "" {
 		fmt.Fprintln(os.Stderr, "trace: --milestone is only valid in tests mode")
 		return 2
 	}
 
 	var findings []string
-	if mode == "matrix" || mode == "all" {
+	if m == modeMatrix || m == modeAll {
 		f, err := runMatrix(dir)
 		findings = append(findings, f...)
 		if err != nil {
@@ -127,7 +150,7 @@ func run(args []string) int {
 			return 2
 		}
 	}
-	if mode == "stamp" || mode == "all" {
+	if m == modeStamp || m == modeAll {
 		f, err := runStamp(dir, write)
 		findings = append(findings, f...)
 		if err != nil {
@@ -142,7 +165,7 @@ func run(args []string) int {
 		}
 	}
 
-	if mode == "tests" {
+	if m == modeTests {
 		f, err := runTests(dir, ".", milestone)
 		findings = append(findings, f...)
 		if err != nil {
@@ -163,12 +186,12 @@ func run(args []string) int {
 		fmt.Printf("trace FAIL: %d finding(s)\n", len(findings))
 		return 1
 	}
-	switch mode {
-	case "matrix":
+	switch m {
+	case modeMatrix:
 		fmt.Println("trace: 08-traceability.md agrees with 01-prd.md and 07-test-plan.md (byte-exact)")
-	case "stamp":
+	case modeStamp:
 		fmt.Printf("trace: spec stamp in sync (%s)\n", dir)
-	case "tests":
+	case modeTests:
 		fmt.Printf("trace: each test ID up to %s has a Go test or a marker\n", milestone)
 	default:
 		fmt.Println("trace: matrix and stamp in sync")
