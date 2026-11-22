@@ -478,36 +478,67 @@ func TestTS38_SyncDirRootRule(t *testing.T) {
 }
 
 // The directory is swapped for a link after OpenRoot has checked it and
-// before the sync. A sync that opens the directory by path again fails or
-// syncs the wrong directory.
+// before the sync. A sync that opens the directory by path again syncs the
+// directory behind the link. An absolute link makes such a reopen fail. A
+// relative link inside the root lets it pass, so the test checks the open
+// descriptors at the sync.
 func TestTS38_SyncDirDoesNotReopenByPath(t *testing.T) {
-	r, dir := root(t)
-	tree(t, dir)
-	other := filepath.Join(dir, "other")
-	if err := os.Mkdir(other, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	calls := 0
-	safefiletest.Set(t, safefiletest.Hooks{
-		// The owner check of the last part runs after its open.
-		OtherOwner: func(FileID) bool {
-			if calls++; calls == 2 {
-				b := filepath.Join(dir, "a", "b")
-				if err := os.Rename(b, filepath.Join(dir, "a", "moved")); err != nil {
-					t.Error(err)
-				}
-				if err := os.Symlink(other, b); err != nil {
-					t.Error(err)
-				}
+	for _, link := range []string{"absolute", "../other"} {
+		t.Run(link, func(t *testing.T) {
+			r, dir := root(t)
+			tree(t, dir)
+			other := filepath.Join(dir, "other")
+			if err := os.Mkdir(other, 0o700); err != nil {
+				t.Fatal(err)
 			}
-			return false
-		},
-	})
-	if err := SyncDir(r, "a/b", dirRule); err != nil {
-		t.Fatalf("SyncDir: %v", err)
-	}
-	if calls != 2 {
-		t.Errorf("owner checks = %d, want 2", calls)
+			target := link
+			if link == "absolute" {
+				target = other
+			}
+			fdTargets(t) // skips the test when there is no /proc/self/fd
+			calls, moved, wrong := 0, 0, 0
+			safefiletest.Set(t, safefiletest.Hooks{
+				// The owner check of the last part runs after its open.
+				OtherOwner: func(FileID) bool {
+					if calls++; calls == 2 {
+						b := filepath.Join(dir, "a", "b")
+						if err := os.Rename(b, filepath.Join(dir, "a", "moved")); err != nil {
+							t.Error(err)
+						}
+						if err := os.Symlink(target, b); err != nil {
+							t.Error(err)
+						}
+					}
+					return false
+				},
+				Step: func(step, _ string) error {
+					if step != "dirsync" {
+						return nil
+					}
+					for _, p := range fdTargets(t) {
+						switch {
+						case strings.HasSuffix(p, "/a/moved"):
+							moved++
+						case strings.HasSuffix(p, "/other"):
+							wrong++
+						}
+					}
+					return nil
+				},
+			})
+			if err := SyncDir(r, "a/b", dirRule); err != nil {
+				t.Fatalf("SyncDir: %v", err)
+			}
+			if calls != 2 {
+				t.Errorf("owner checks = %d, want 2", calls)
+			}
+			if moved == 0 {
+				t.Error("the sync has no descriptor to the checked directory")
+			}
+			if wrong != 0 {
+				t.Errorf("%d descriptors to the directory behind the link", wrong)
+			}
+		})
 	}
 }
 
@@ -566,21 +597,27 @@ func TestTS38_WriteRuleRefused(t *testing.T) {
 		"random no pref": with(func(w *WriteRule) { w.Temp = TempRandom }),
 		"random slash":   with(func(w *WriteRule) { w.Temp, w.Prefix = TempRandom, "a/b-" }),
 	}
-	check := func(label string, root *os.Root, name string, w WriteRule) {
+	check := func(label string, root *os.Root, name string, w WriteRule, want error) {
 		t.Helper()
-		if _, err := WriteTemp(root, name, []byte("x"), w); !errors.Is(err, ErrRule) {
-			t.Errorf("%s: WriteTemp err = %v, want ErrRule", label, err)
+		if _, err := WriteTemp(root, name, []byte("x"), w); !errors.Is(err, want) {
+			t.Errorf("%s: WriteTemp err = %v, want %v", label, err, want)
 		}
-		if err := Replace(root, name, []byte("x"), w); !errors.Is(err, ErrRule) {
-			t.Errorf("%s: Replace err = %v, want ErrRule", label, err)
+		if err := Replace(root, name, []byte("x"), w); !errors.Is(err, want) {
+			t.Errorf("%s: Replace err = %v, want %v", label, err, want)
+		}
+		var we *WriteError
+		if _, err := WriteTemp(root, name, []byte("x"), w); errors.As(err, &we) {
+			t.Errorf("%s: the refusal is a *WriteError", label)
 		}
 	}
 	for label, w := range rules {
-		check(label, r, "f", w)
+		check(label, r, "f", w, ErrRule)
 	}
-	check("nil root", nil, "f", fixedRule)
+	check("nil root", nil, "f", fixedRule, ErrRule)
+	check("nil root and bad name", nil, "", fixedRule, ErrRule)
+	check("bad rule and bad name", r, "", WriteRule{}, ErrRule)
 	for _, name := range []string{"", ".", "..", "/f", "a/../f", "a//f", "a/./f", "a/"} {
-		check("name "+name, r, name, fixedRule)
+		check("name "+name, r, name, fixedRule, ErrName)
 	}
 	if got := names(t, dir); len(got) != 1 || got[0] != "a" {
 		t.Errorf("entries = %v, want only a", got)
@@ -838,11 +875,17 @@ func TestTS38_WriteDirLinkRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"link/f", "link/b/f"} {
-		if err := Replace(r, name, []byte("x"), fixedRule); !errors.Is(err, ErrSymlink) {
-			t.Errorf("Replace %q: err = %v, want ErrSymlink", name, err)
+		err := Replace(r, name, []byte("x"), fixedRule)
+		if !errors.Is(err, ErrCreate) || !errors.Is(err, ErrSymlink) {
+			t.Errorf("Replace %q: err = %v, want ErrCreate and ErrSymlink", name, err)
 		}
-		if _, err := WriteTemp(r, name, []byte("x"), fixedRule); !errors.Is(err, ErrSymlink) {
-			t.Errorf("WriteTemp %q: err = %v, want ErrSymlink", name, err)
+		_, err = WriteTemp(r, name, []byte("x"), fixedRule)
+		if !errors.Is(err, ErrCreate) || !errors.Is(err, ErrSymlink) {
+			t.Errorf("WriteTemp %q: err = %v, want ErrCreate and ErrSymlink", name, err)
+		}
+		var we *WriteError
+		if !errors.As(err, &we) || we.Step != ErrCreate {
+			t.Errorf("WriteTemp %q: err = %v is not a *WriteError of ErrCreate", name, err)
 		}
 	}
 	if got := names(t, filepath.Join(dir, "a")); !slices.Equal(got, []string{"b"}) {
@@ -890,6 +933,172 @@ func TestTS38_ReplaceNeverFollowsLinks(t *testing.T) {
 					t.Errorf("f: %v, %v", fi, err)
 				}
 			})
+		}
+	}
+}
+
+// entryState describes the entry at p without following a link.
+func entryState(p string) string {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return "none"
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		l, _ := os.Readlink(p)
+		return "symlink to " + l
+	}
+	b, _ := os.ReadFile(p)
+	return fmt.Sprintf("%v %q", fi.Mode(), b)
+}
+
+// An entry that appears at the temporary name before the create is not
+// followed, not changed and not removed: the create fails with EEXIST.
+func TestTS38_ReplacePlantedTempEntryIsKept(t *testing.T) {
+	kinds := []string{"symlink in root", "symlink outside", "dangling symlink",
+		"regular file", "hard link"}
+	for _, kind := range kinds {
+		for _, w := range []WriteRule{fixedRule, randomRule} {
+			t.Run(fmt.Sprintf("%s/temp=%d", kind, w.Temp), func(t *testing.T) {
+				top := t.TempDir()
+				dir := filepath.Join(top, "root")
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				r, err := os.OpenRoot(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer r.Close()
+				put(t, dir, "f", "OLD")
+				put(t, dir, "target", "TARGET")
+				put(t, top, "outside", "OUTSIDE")
+				var planted, before string
+				safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
+					if step != "create" {
+						return nil
+					}
+					planted = filepath.Join(dir, name)
+					var err error
+					switch kind {
+					case "symlink in root":
+						err = os.Symlink("target", planted)
+					case "symlink outside":
+						err = os.Symlink(filepath.Join(top, "outside"), planted)
+					case "dangling symlink":
+						err = os.Symlink("missing", planted)
+					case "regular file":
+						err = os.WriteFile(planted, []byte("PLANTED"), 0o600)
+					case "hard link":
+						err = os.Link(filepath.Join(dir, "target"), planted)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					before = entryState(planted)
+					return nil
+				}})
+				err = Replace(r, "f", []byte("new"), w)
+				if !errors.Is(err, ErrCreate) || !errors.Is(err, syscall.EEXIST) {
+					t.Errorf("err = %v, want ErrCreate with EEXIST", err)
+				}
+				if planted == "" {
+					t.Fatal("the create step did not run")
+				}
+				if got := entryState(planted); got != before || got == "none" {
+					t.Errorf("entry at the temporary name = %s, was %s", got, before)
+				}
+				if got := content(t, filepath.Join(dir, "target")); got != "TARGET" {
+					t.Errorf("target = %q, want it unchanged", got)
+				}
+				if got := content(t, filepath.Join(top, "outside")); got != "OUTSIDE" {
+					t.Errorf("outside file = %q, want it unchanged", got)
+				}
+				if got := content(t, filepath.Join(dir, "f")); got != "OLD" {
+					t.Errorf("f = %q, want OLD", got)
+				}
+				if got := entryState(filepath.Join(dir, "missing")); got != "none" {
+					t.Errorf("entry at the link target = %s, want none", got)
+				}
+			})
+		}
+	}
+}
+
+func TestTS38_ReplaceFixedTempNotEmptyDirectory(t *testing.T) {
+	r, dir := privateRoot(t)
+	put(t, dir, "f", "OLD")
+	if err := os.Mkdir(filepath.Join(dir, "f.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(dir, "f.tmp"), "x", "X")
+	err := Replace(r, "f", []byte("new"), fixedRule)
+	if !errors.Is(err, ErrTempRemove) || errors.Is(err, ErrMayBeRenamed) {
+		t.Errorf("err = %v, want ErrTempRemove without ErrMayBeRenamed", err)
+	}
+	if got := content(t, filepath.Join(dir, "f")); got != "OLD" {
+		t.Errorf("f = %q, want OLD", got)
+	}
+	if got := content(t, filepath.Join(dir, "f.tmp", "x")); got != "X" {
+		t.Errorf("entry in the directory = %q, want X", got)
+	}
+}
+
+func TestTS38_ReplaceFailedCleanupKeepsBothErrors(t *testing.T) {
+	for _, w := range []WriteRule{fixedRule, randomRule} {
+		t.Run(fmt.Sprintf("temp=%d", w.Temp), func(t *testing.T) {
+			r, dir := privateRoot(t)
+			put(t, dir, "f", "OLD")
+			failed := false
+			safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+				switch {
+				case step == "write":
+					failed = true
+					return syscall.ENOSPC
+				case step == "remove" && failed:
+					return syscall.EIO
+				}
+				return nil
+			}})
+			err := Replace(r, "f", []byte("new"), w)
+			if !errors.Is(err, ErrWrite) || !errors.Is(err, ErrTempRemove) ||
+				!errors.Is(err, syscall.ENOSPC) || !errors.Is(err, syscall.EIO) {
+				t.Errorf("err = %v, want ErrWrite and ErrTempRemove with their causes", err)
+			}
+			if errors.Is(err, ErrMayBeRenamed) {
+				t.Error("err matches ErrMayBeRenamed")
+			}
+			if got := content(t, filepath.Join(dir, "f")); got != "OLD" {
+				t.Errorf("f = %q, want OLD", got)
+			}
+		})
+	}
+}
+
+func TestTS38_ReplaceCleanupMissingTempIsNotFailure(t *testing.T) {
+	r, dir := privateRoot(t)
+	put(t, dir, "f", "OLD")
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
+		if step != "write" {
+			return nil
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Error(err)
+		}
+		return syscall.ENOSPC
+	}})
+	err := Replace(r, "f", []byte("new"), randomRule)
+	if !errors.Is(err, ErrWrite) || errors.Is(err, ErrTempRemove) {
+		t.Errorf("err = %v, want ErrWrite without ErrTempRemove", err)
+	}
+}
+
+func TestTS38_WriteFailTypedNilCause(t *testing.T) {
+	var pe *fs.PathError
+	var le *os.LinkError
+	for _, cause := range []error{pe, le} {
+		err := writeFail(ErrWrite, cause, false)
+		if !errors.Is(err, ErrWrite) || err.Error() != ErrWrite.Error() {
+			t.Errorf("cause %T: err = %v", cause, err)
 		}
 	}
 }

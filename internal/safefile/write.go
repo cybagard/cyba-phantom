@@ -34,10 +34,11 @@ var (
 var ErrMayBeRenamed = errors.New("safefile: write: new file may be in place")
 
 // WriteError is the failure of one step of a write. Its text is the fixed text
-// of the step. It holds no path, no name and no file bytes.
+// of the step and holds no path. A Cause that wraps an error keeps it as given.
+// Such a cause can come from the check callback and can hold a path.
 type WriteError struct {
 	Step  error // one of the step values
-	Cause error // the system error without its path, or nil
+	Cause error // the cause of the failure, or nil
 
 	// After is true when the step ran after the rename or the link.
 	After bool
@@ -76,9 +77,15 @@ func (e *WriteError) Unwrap() []error {
 func writeFail(step, cause error, after bool) error {
 	switch e := cause.(type) {
 	case *fs.PathError:
-		cause = e.Err
+		cause = nil // a typed nil pointer has no cause
+		if e != nil {
+			cause = e.Err
+		}
 	case *os.LinkError:
-		cause = e.Err
+		cause = nil
+		if e != nil {
+			cause = e.Err
+		}
 	}
 	return &WriteError{Step: step, Cause: cause, After: after}
 }
@@ -188,7 +195,9 @@ func SyncDir(root *os.Root, dir string, r Rule) error {
 	return err
 }
 
-// TempName is the rule for the name of the temporary file.
+// TempName is the rule for the name of the temporary file. TempFixed is for
+// one writer of the name. The caller must not use "<name>.tmp" for other data:
+// WriteTemp and Replace remove it.
 type TempName uint8
 
 // The temporary names.
@@ -204,7 +213,7 @@ type WriteRule struct {
 	Prefix    string       // TempRandom only: not empty, with no slash
 	NoDirSync bool         // Replace does not sync the directory
 	Dir       Rule         // the rule for the directory of the name
-	Check     func() error // runs after the file sync, before the rename
+	Check     func() error // Replace only: runs before the rename
 }
 
 // valid is false for the zero rule and for each value that is not defined.
@@ -222,14 +231,19 @@ func (w WriteRule) valid() bool {
 }
 
 // WriteTemp writes data to a new temporary file next to name. It syncs and
-// closes the file, and gives its name relative to root. The directory part of
-// name is opened with OpenRoot and w.Dir. A name with no directory part uses
+// closes the file, and gives its name relative to root. It opens the directory
+// part of name with OpenRoot and w.Dir. A name with no directory part uses
 // root, checked with w.Dir too. Each file step uses a name in that open
-// directory, so a link is never followed. The file is made with O_EXCL and
-// O_NOFOLLOW. The mode is set with Chmod, so umask does not change it. A
-// failed step removes the temporary file. Each error is a *WriteError of its
-// step. An invalid rule, a nil root or a name that OpenRoot does not accept
-// gives ErrRule. seam.Crash returns at once, with no removal.
+// directory, so a link is never followed. The flag O_EXCL refuses an existing
+// entry at the temporary name, also a link. WriteTemp sets the mode with
+// Chmod, so umask does not change it. It does not call w.Check. A failed step
+// removes the temporary file that it made. A failed removal adds ErrTempRemove
+// to the error.
+//
+// A failed step gives a *WriteError. A nil root or an invalid rule gives
+// ErrRule. A name that OpenRoot does not accept gives ErrName. ErrRule and
+// ErrName are *Error values. seam.Crash is no *WriteError: it returns at once,
+// with no removal.
 func WriteTemp(root *os.Root, name string, data []byte, w WriteRule) (string, error) {
 	return write(root, name, data, w, false)
 }
@@ -245,9 +259,12 @@ func Replace(root *os.Root, name string, data []byte, w WriteRule) error {
 }
 
 func write(root *os.Root, name string, data []byte, w WriteRule, replace bool) (string, error) {
-	ps, ok := parts(name)
-	if root == nil || !w.valid() || !ok {
+	if root == nil || !w.valid() {
 		return "", fail(ErrRule, nil)
+	}
+	ps, ok := parts(name)
+	if !ok {
+		return "", fail(ErrName, nil)
 	}
 	dir := "."
 	if len(ps) > 1 {
@@ -274,13 +291,23 @@ func write(root *os.Root, name string, data []byte, w WriteRule, replace bool) (
 
 // discard removes the temporary file after the failure err. It gives err, or
 // seam.Crash when a crash stops the removal. After a crash it removes nothing.
+// A failed removal gives err and the removal error together. A missing file is
+// not a failure.
 func discard(h *seam.Hooks, d *os.Root, tmp string, err error) error {
 	if errors.Is(err, seam.Crash) {
 		return err
 	}
-	rerr := runStep(h, "remove", tmp, false, func() error { return d.Remove(tmp) })
+	rerr := runStep(h, "remove", tmp, false, func() error {
+		if err := d.Remove(tmp); !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	})
 	if errors.Is(rerr, seam.Crash) {
 		return rerr
+	}
+	if rerr != nil {
+		return errors.Join(err, rerr)
 	}
 	return err
 }
