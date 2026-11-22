@@ -372,3 +372,76 @@ func TestTS38_SyncDirCrash(t *testing.T) {
 		t.Errorf("descriptors: %d before, %d after a crash", before, after)
 	}
 }
+
+// fdTargets gives the targets of the descriptor links of this process.
+func fdTargets(t *testing.T) []string {
+	t.Helper()
+	es, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("no /proc/self/fd: %v", err)
+	}
+	var out []string
+	for _, e := range es {
+		if p, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func TestTS38_SyncDirSyncsCheckedDirectory(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	other := filepath.Join(dir, "other")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fdTargets(t) // skips the test when there is no /proc/self/fd
+	var moved, wrong int
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(string, string) error {
+		b := filepath.Join(dir, "a", "b")
+		if err := os.Rename(b, filepath.Join(dir, "a", "moved")); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(other, b); err != nil {
+			t.Error(err)
+		}
+		for _, p := range fdTargets(t) {
+			switch {
+			case strings.HasSuffix(p, "/a/moved"):
+				moved++
+			case strings.HasSuffix(p, "/other"):
+				wrong++
+			}
+		}
+		return nil
+	}})
+	if err := SyncDir(r, "a/b", dirRule); err != nil {
+		t.Fatalf("SyncDir: %v", err)
+	}
+	// The root of the checked directory and the file of "." point to it.
+	if moved < 2 {
+		t.Errorf("%d descriptors to the checked directory, want 2 or more", moved)
+	}
+	if wrong != 0 {
+		t.Errorf("%d descriptors to the directory behind the new link", wrong)
+	}
+}
+
+func TestTS38_SyncDirOpenRootDirFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the mode")
+	}
+	r, dir := root(t)
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	err := SyncDir(r, ".", dirRule)
+	if !errors.Is(err, ErrDirSync) || !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("err = %v, want ErrDirSync with EACCES", err)
+	}
+	if strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "/") {
+		t.Errorf("text %q holds a path", err.Error())
+	}
+}
