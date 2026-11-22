@@ -33,7 +33,29 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Environ(), os.Stdout, os.Stderr))
 }
 
-// run returns the exit code: 0 for a valid config, 1 for an invalid config, 2 for a usage error.
+// run returns the exit code of the process.
+//
+// Exit code 2 means a usage error: the flags do not parse, or there is not
+// exactly one config path. An unrecovered panic or a fatal runtime error
+// also ends the process with code 2. The decoy HTTP servers recover a panic
+// in a TLS handshake or a request.
+//
+// Exit code 1 means one of these causes:
+//   - The config file does not load, or a file that it names is not valid.
+//   - In serve mode, the queue, a socket, the sensor time, the retention cap
+//     or the decoy listener does not start.
+//   - In serve mode, the close at stop does not end in its time bound.
+//   - In serve mode, a serve call ends with an error.
+//
+// Exit code 0 means one of these causes:
+//   - With --check, the config is valid.
+//   - In serve mode, the close ends in its time bound, and no serve call
+//     ends with an error.
+//
+// Other start failures in serve mode do not change the code. Examples are
+// the state directory, the store database and the certificate client. A
+// second SIGINT or SIGTERM during the stop kills the process. See serveWith
+// for the detail.
 func run(args, env []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("phantom", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // The flag package prints a flag name raw, so run prints a fixed usage line.
