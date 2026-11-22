@@ -440,10 +440,10 @@ func (g *reloadRig) getter(path string) (get func(kind string) (int, string, err
 func sighupUnderLoad(t *testing.T, pages bool) {
 	const total, swaps = 250, 5
 	inside, gate, probe := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
-	oldServer := newServer
-	t.Cleanup(func() { newServer = oldServer })
-	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
-		return oldServer(c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sm := seamsOf(t)
+	prevServer := sm.newServer
+	sm.newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+		return seams{newServer: prevServer}.orDefault().newServer(c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Header.Get("X-Kind") {
 			case "hold":
 				w = holdWriter{w, func() { inside <- struct{}{}; <-gate }}
