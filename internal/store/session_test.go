@@ -108,7 +108,7 @@ func TestTS31OneSessionInOneBatchIsOneUpsert(t *testing.T) {
 		// 37 and 500 have no common factor, so the ts values cover 1000..1499.
 		ts := int64(1499 - i*37%500)
 		batch = append(batch, sessEvent(t, event.KindRequest, "sess-one",
-			fmt.Sprintf("198.51.100.%d", i%250+1), fmt.Sprintf("ja4-%d", i), ts))
+			fmt.Sprintf("198.51.100.%d", i%250+1), fmt.Sprintf("ja4_%d", i), ts))
 	}
 	r.writeOK(batch...)
 	if execs != 1 {
@@ -118,7 +118,7 @@ func TestTS31OneSessionInOneBatchIsOneUpsert(t *testing.T) {
 		t.Errorf("%d session rows, want 1", n)
 	}
 	k := netip.MustParseAddr("198.51.100.1").As4()
-	r.want("sess-one", 1000, 1499, 500, "198.51.100.1", mac(key, k[:]), "ja4-0")
+	r.want("sess-one", 1000, 1499, 500, "198.51.100.1", mac(key, k[:]), "ja4_0")
 }
 
 // T-S-31: 500 request events of 500 sessions make 500 rows.
@@ -143,18 +143,18 @@ func TestTS31SecondBatchKeepsFirstValues(t *testing.T) {
 	r := newRig(t, 100)
 	key := seedKeys(t, 1)[0]
 	r.w.clock = func() time.Time { return day("2026-03-01T10:00:00Z") }
-	r.writeOK(sessEvent(t, event.KindRequest, "s", "198.51.100.1", "ja4-a", 1000),
-		sessEvent(t, event.KindRequest, "s", "198.51.100.1", "ja4-a", 2000))
+	r.writeOK(sessEvent(t, event.KindRequest, "s", "198.51.100.1", "ja4_a", 1000),
+		sessEvent(t, event.KindRequest, "s", "198.51.100.1", "ja4_a", 2000))
 	k := netip.MustParseAddr("198.51.100.1").As4()
 	hm := mac(key, k[:])
-	r.want("s", 1000, 2000, 2, "198.51.100.1", hm, "ja4-a")
+	r.want("s", 1000, 2000, 2, "198.51.100.1", hm, "ja4_a")
 
-	r.writeOK(sessEvent(t, event.KindRequest, "s", "192.0.2.9", "ja4-b", 3000),
-		sessEvent(t, event.KindRequest, "s", "192.0.2.9", "ja4-b", 2500))
-	r.want("s", 1000, 3000, 4, "198.51.100.1", hm, "ja4-a")
+	r.writeOK(sessEvent(t, event.KindRequest, "s", "192.0.2.9", "ja4_b", 3000),
+		sessEvent(t, event.KindRequest, "s", "192.0.2.9", "ja4_b", 2500))
+	r.want("s", 1000, 3000, 4, "198.51.100.1", hm, "ja4_a")
 
-	r.writeOK(sessEvent(t, event.KindRequest, "s", "192.0.2.9", "ja4-b", 500))
-	r.want("s", 1000, 3000, 5, "198.51.100.1", hm, "ja4-a")
+	r.writeOK(sessEvent(t, event.KindRequest, "s", "192.0.2.9", "ja4_b", 500))
+	r.want("s", 1000, 3000, 5, "198.51.100.1", hm, "ja4_a")
 	if n := r.sessionCount(); n != 1 {
 		t.Errorf("%d session rows, want 1", n)
 	}
@@ -236,8 +236,8 @@ func TestTS31KnownSessionKeepsOtherColumns(t *testing.T) {
 	if _, err := r.db.Exec("INSERT INTO session (id, first_seen, last_seen, ip, ip_hmac, ja4, ua, family, beacon_seen, req_count, band, score, alerted_at) VALUES ('known', 100, 200, NULL, 'h0', NULL, 'u', 'f', 1, 3, 'agent-confirmed', 97, 9)"); err != nil {
 		t.Fatal(err)
 	}
-	r.writeOK(sessEvent(t, event.KindRequest, "known", "198.51.100.1", "ja4-a", 50),
-		sessEvent(t, event.KindRequest, "known", "198.51.100.1", "ja4-a", 250))
+	r.writeOK(sessEvent(t, event.KindRequest, "known", "198.51.100.1", "ja4_a", 50),
+		sessEvent(t, event.KindRequest, "known", "198.51.100.1", "ja4_a", 250))
 	var first, last, beacon, count, score, alerted int64
 	var ip, ja4, ua, family *string
 	var hmac, band string

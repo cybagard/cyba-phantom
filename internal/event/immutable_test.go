@@ -36,7 +36,7 @@ func fullInput(k event.Kind) event.Input {
 	in := event.Input{
 		Kind: k, Vhost: "decoy.example", Method: "POST", Path: "/p?x=1", TrapID: "trap-1",
 		TokenID: "tok-1", Status: &status, Surface: event.SurfaceBody,
-		JA4: "ja4-value", H2: "h2-value", Hdr: "hdr-value",
+		JA4: "ja4_value", H2: "h2-value", Hdr: "hdr-value",
 		Detail:   event.Detail{"count": event.Int(7), "flag": event.Bool(true), "note": event.Str("n")},
 		ClientIP: "2001:db8::7", BodyPrefix: []byte("body prefix bytes"),
 	}
@@ -54,7 +54,7 @@ func bigInput(k event.Kind) event.Input {
 	in := event.Input{
 		Kind: k, Vhost: ctl + strings.Repeat("a", 253), Method: ctl, Path: strings.Repeat("\"", 2100),
 		TrapID: ctl, TokenID: ctl, Status: &status, Surface: event.SurfaceHeader,
-		JA4: ctl, H2: ctl, Hdr: ctl, Detail: event.Detail{"a": event.Str(strings.Repeat("\x01", 340))},
+		JA4: strings.Repeat("a", 128), H2: ctl, Hdr: ctl, Detail: event.Detail{"a": event.Str(strings.Repeat("\x01", 340))},
 		ClientIP: "2001:db8:1234:5678:9abc:def0:1234:5678", BodyPrefix: make([]byte, 9000),
 	}
 	if hasSession(k) {
@@ -231,7 +231,7 @@ func TestTS12_AccessorsShareNoMemory(t *testing.T) {
 					before := take(t, e)
 					if v.name == "full" {
 						rec := e.Record()
-						if rec.Path == nil || *rec.Path != "/p?x=1" || rec.FP == nil || *rec.FP.JA4 != "ja4-value" ||
+						if rec.Path == nil || *rec.Path != "/p?x=1" || rec.FP == nil || *rec.FP.JA4 != "ja4_value" ||
 							rec.Detail["count"] != event.Int(7) || e.IP() != "2001:db8::7" || string(e.BodyPrefix()) != "body prefix bytes" {
 							t.Fatalf("the event lacks a value of its input: %+v", rec)
 						}
