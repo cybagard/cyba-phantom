@@ -349,11 +349,15 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // roll-up steps. A request row that the run finds at its start rolls up
 // before the event delete removes it. The configuration keeps the events days
 // not below the raw days (internal/config/validate.go). The event step has a
-// capped cutoff: see eventTime. It also caps the cutoff in each chunk at the
-// day that the day step works on next. These three deletes come before the
-// field clear, for the same reason as the raw delete. The clear does not write
-// rows that the event delete removes. The clear takes its cutoff from tPriv.
-// The mark step is last, so a run that ends early writes no retention_last.
+// capped cutoff: see eventTime. The day step has a day in progress or a next
+// day. The event step keeps each row with a stored ts at or after that day.
+// These three deletes come before the field clear. The reason is the same as
+// for the raw delete.
+// The clear does not write rows that the event delete removes. The clear takes
+// its cutoff from tPriv.
+// The clock_jump delete comes after the event and session deletes, so it sees
+// their result. The mark step is last, so a run that ends early writes no
+// retention_last.
 //
 // The time of the run is `st`. The mark step takes it. The field clear also
 // takes it, as its time at its first call. This form is for tests that need no
@@ -373,11 +377,12 @@ func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, 
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
 		newIPStep(tPriv, ip),
-		newRawDeleteStep(tDel, raw),
+		newJumpRawDeleteStep(tDel, raw),
 		newCounterDeleteStep(tDel, raw),
 		newEventExpireStep(eventTime(tDel, raw, events), events),
 		newTokenExpireStep(tDel, events),
 		newSessionExpireStep(tDel, events),
+		newJumpExpireStep(),
 		newFieldClearStep(tPriv, clock, raw),
 		newMintStep(tDel, raw),
 		markStep(st),
