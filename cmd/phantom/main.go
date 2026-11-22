@@ -36,8 +36,9 @@ func main() {
 // run returns the exit code of the process.
 //
 // Exit code 2 means a usage error: the flags do not parse, or there is not
-// exactly one config path. An unrecovered panic also ends the process with
-// code 2. The HTTP server recovers a panic in a request.
+// exactly one config path. An unrecovered panic or a fatal runtime error
+// also ends the process with code 2. The decoy HTTP servers recover a panic
+// in a TLS handshake or a request.
 //
 // Exit code 1 means one of these causes:
 //   - The config file does not load, or a file that it names is not valid.
