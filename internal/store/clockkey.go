@@ -93,6 +93,7 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 		return err
 	}
 	w.clk, w.src = clk, src
+	w.knownJump = in.KnownJumpID
 	if err := w.writeKey(res.State, res.Jump); err != nil {
 		w.clk = nil
 		return err
@@ -175,12 +176,93 @@ func (w *Writer) writeKey(st sensortime.State, jump *sensortime.JumpResult) (err
 	if err != nil {
 		return fail(writerName, ruleDatabase)
 	}
+	if jump != nil && jump.Kind == sensortime.KindGrace {
+		w.graceAt = max(w.graceAt, st.Jump.At)
+	}
+	w.keyStored(st)
+	return nil
+}
+
+// keyStored sets the state in memory. Call it only after a COMMIT that stored
+// the key of st. The floor is not below the values in memory. After a grace
+// jump, a new row must not get a rowid in the range of the jump. Then it calls
+// Committed.
+func (w *Writer) keyStored(st sensortime.State) {
 	w.floorEvent, w.floorSession = st.NextEvent, st.NextSession
-	// The floor is not below the values in memory. After a grace jump, a new
-	// row must not get a rowid in the range of the jump.
 	w.nextEvent, w.nextSession = st.NextEvent, st.NextSession
 	w.lastKey = st.BootClock
 	w.clk.Committed()
+}
+
+// moveKey writes the key in the transaction of a batch that moves a range end
+// (ADR-043). The state is the Snapshot of the clock. The rowid floor is the
+// largest of three values. The first is the floor that the writer wrote last.
+// The second is the floor of the Snapshot. The third is the next rowid of event
+// and of session after the batch. The caller calls keyStored after the COMMIT.
+// Between moveKey and keyStored, the writer calls no Check.
+func (w *Writer) moveKey(ctx context.Context, tx *sql.Tx, nextEv, nextSes int64) (sensortime.State, error) {
+	st, err := w.clk.Snapshot()
+	if err != nil {
+		return st, fail(clockName, ruleClock)
+	}
+	st.NextEvent = max(w.floorEvent, st.NextEvent, nextEv)
+	st.NextSession = max(w.floorSession, st.NextSession, nextSes)
+	v, err := st.Encode()
+	if err != nil {
+		return st, fail(clockName, ruleClock)
+	}
+	if _, err := tx.ExecContext(ctx, metaSetSQL, sensorTimeKey, v); err != nil {
+		return st, fail(writerName, ruleDatabase)
+	}
+	return st, nil
+}
+
+// moveEndSQL makes the statement that moves the end of the ranges of the grace
+// rows of this process. The statement takes five values in this order. The
+// first and the second are the first and the last rowid of the batch. The third
+// is the largest id of an earlier process. The fourth is the smallest time of
+// the batch. The fifth is the reset `at`. For each grace row, the subquery
+// finds the largest rowid of the batch with a time before `at`. The `+` before
+// the time column keeps the planner off the time index. The update moves an end
+// only up. The statement uses the primary key of clock_jump and a rowid range
+// of the table.
+func moveEndSQL(table, idCol, timeCol string, k rowKind) string {
+	return "UPDATE clock_jump SET " + k.to + " = m.hi FROM (SELECT c.id AS cid, " +
+		"(SELECT max(" + idCol + ") FROM " + table + " WHERE " + idCol + " BETWEEN ? AND ? AND +" + timeCol + " < c.at) AS hi " +
+		"FROM clock_jump AS c WHERE c.id > ? AND c.at > ? AND c.at < ?) AS m " +
+		"WHERE clock_jump.id = m.cid AND m.hi > clock_jump." + k.to
+}
+
+var (
+	moveEventEndSQL   = moveEndSQL("event", "id", "ts", eventRows)
+	moveSessionEndSQL = moveEndSQL("session", "rowid", "first_seen", sessionRows)
+)
+
+// moveEnds moves the end of the ranges of each grace row of this process. It
+// runs in the transaction of a batch (ADR-043). The batch has the event rowids
+// firstEv to lastEv and the new session rowids firstSes to lastSes. A grace row
+// takes the largest of these rowids with a time before its `at`. For a session,
+// the time is first_seen. A session that the batch only updates keeps its old
+// rowid. That rowid is not in the range, so it does not count. A grace row with
+// no such rowid keeps its end. minTS is the smallest time of the batch. The
+// statement leaves out the grace rows that no row of the batch can match. The
+// caller runs moveEnds only when minTS is before the largest `at` of this
+// process. The call keeps no memory for each row.
+func (w *Writer) moveEnds(ctx context.Context, tx *sql.Tx, firstEv, lastEv, firstSes, lastSes, minTS int64) error {
+	if w.beforeMove != nil {
+		w.beforeMove()
+	}
+	for _, m := range []struct {
+		q           string
+		first, last int64
+	}{{moveEventEndSQL, firstEv, lastEv}, {moveSessionEndSQL, firstSes, lastSes}} {
+		if m.first > m.last {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, m.q, m.first, m.last, w.knownJump, minTS, int64(resetAt)); err != nil {
+			return fail(writerName, ruleDatabase)
+		}
+	}
 	return nil
 }
 

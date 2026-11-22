@@ -304,7 +304,12 @@ func (s *Schedule) runAt(stop context.Context, st time.Time) {
 	run := &retentionRun{}
 	run.counts.CutoffIP, _ = retentionCutoff(st, s.ip, 7)
 	run.counts.CutoffRaw, _ = rollupCutoff(st, s.raw)
-	steps := runStepsClock(st, clockNow, st, st, s.ip, s.raw, s.events)
+	// A writer with no clock has no clock_jump row of its own process.
+	var known *int64
+	if s.w.clk != nil {
+		known = &s.w.knownJump
+	}
+	steps := runStepsClock(st, clockNow, st, st, s.ip, s.raw, s.events, known)
 	steps = withCap(steps, run, s.w, s.maxBytes, s.dbRel, st, s.capUnmet, s.tune)
 	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
@@ -363,7 +368,7 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // takes it, as its time at its first call. This form is for tests that need no
 // clock. See runStepsClock.
 func runSteps(st, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
-	return runStepsClock(st, func() time.Time { return st }, tDel, tPriv, ip, raw, events)
+	return runStepsClock(st, func() time.Time { return st }, tDel, tPriv, ip, raw, events, nil)
 }
 
 // runStepsClock is runSteps with a clock. The mark step takes `st`, the S at
@@ -371,8 +376,10 @@ func runSteps(st, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 // call. That call comes after the steps before it, so it can be long after the
 // run start. With the run start, rows that the writer stores in between could
 // lie after the future line. The schedule passes a function that reads S as
-// `clock`.
-func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
+// `clock`. The clock_jump delete reads *known when it runs: the largest
+// clock_jump id at StartClock (see newJumpExpireStep). A nil known gives no
+// protected row.
+func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, ip, raw, events int, known *int64) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
@@ -381,8 +388,8 @@ func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, 
 		newCounterDeleteStep(tDel, raw),
 		newEventExpireStep(eventTime(tDel, raw, events), events),
 		newTokenExpireStep(tDel, events),
-		newSessionExpireStep(tDel, events),
-		newJumpExpireStep(),
+		newJumpSessionExpireStep(tDel, events),
+		newJumpExpireStep(known),
 		newFieldClearStep(tPriv, clock, raw),
 		newMintStep(tDel, raw),
 		markStep(st),
