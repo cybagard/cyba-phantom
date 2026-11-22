@@ -20,17 +20,24 @@ const (
 	// clear statements repeat it in the same order. Then the index can serve.
 	rawIndexWhere = "body_prefix IS NOT NULL OR detail IS NOT NULL OR record IS NOT NULL"
 
-	// The clear statements set the three fields to NULL on at most a bound of
-	// rows. The subquery picks the rows in ts order from event_raw_ts, and no
-	// row above a rowid. Each picked row has a field. A cleared row leaves the
-	// index. clearPastSQL takes the rows with ts before a cutoff.
-	// clearFutureSQL takes the rows with ts after the future line.
+	// The plain clear statements set the three fields to NULL on at most a
+	// bound of rows. The subquery picks the rows in ts order from
+	// event_raw_ts, and no row above a rowid. Each picked row has a field. A
+	// cleared row leaves the index. clearPastSQL takes the rows with ts before
+	// a cutoff. clearFutureSQL takes the rows with ts after the future line.
+	// The corrected path reads the index in the cursor read clearRead, and
+	// clearIDsSQL clears the rows that it picks.
 	clearPastSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
 		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts < ? AND id <= ? AND (" + rawIndexWhere + ") " +
 		"ORDER BY ts LIMIT ?)"
 	clearFutureSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
 		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts > ? AND id <= ? AND (" + rawIndexWhere + ") " +
 		"ORDER BY ts LIMIT ?)"
+
+	// clearIDsSQL clears the three fields of the rows of a JSON array of
+	// rowids. The cursor read of the past part gives the rowids.
+	clearIDsSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
+		"(SELECT value FROM json_each(?))"
 
 	// clearTopSQL reads the largest event id.
 	clearTopSQL = "SELECT coalesce(max(id), 0) FROM event"
@@ -50,6 +57,16 @@ const (
 	mintDropSQL   = "DELETE FROM mint WHERE set_id = ? AND unit = ?"
 	mintDeleteSQL = "DELETE FROM mint WHERE (set_id, unit, first) IN " +
 		"(SELECT set_id, unit, first FROM mint WHERE set_id = ? AND unit = ? ORDER BY first LIMIT ?)"
+)
+
+// The cursor reads of the field clear and of the raw delete. The clear read
+// has two terms after the time terms. They are the bound `top` and the WHERE
+// text of event_raw_ts. The raw read has the kind as its lead term. A kind is
+// one of rawKinds, which are the kinds of deleteRawSQL.
+var (
+	clearRead = cursorRead("event", "id", "ts", "event_raw_ts", "", " AND id <= ? AND ("+rawIndexWhere+")")
+	rawRead   = cursorRead("event", "id", "ts", "event_kind_ts", "kind = ? AND ", "")
+	rawKinds  = []string{"refused", "beacon"}
 )
 
 // futureLine returns the future line in unix ms. It is the later of the wall
@@ -78,7 +95,8 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // Part 1 clears the rows with ts before the cutoff, in ts order. The cutoff
 // is tPriv minus `days` x 24 h, in unix ms. When part 1 has no row left, part 2
 // clears the rows with ts after the future line. A ts after the line shows a
-// wall clock that was ahead when the row was written.
+// wall clock that was ahead when the row was written. Part 2 has no
+// clock_jump correction.
 //
 // The future line is the later of two values, plus 1 h. One value is the wall
 // time at the first call of the step, from the function `wall`. The other is
@@ -87,11 +105,12 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // Thus a row that a batch writes during the run keeps its fields until the
 // next run. The step ends.
 //
-// Each statement names INDEXED BY event_raw_ts. It repeats the WHERE text of
-// the index in the same order. A call changes at most `limit` rows. It takes
-// the rest of `limit` for part 2 when part 1 ends with fewer rows. It returns
-// the rows that it changed. A count below `limit` means that no row is left in
-// either part. The tally of the fields counts the rows of both parts.
+// Each plain statement names INDEXED BY event_raw_ts. It repeats the WHERE
+// text of the index in the same order. A call changes at most `limit` rows. It
+// takes the rest of `limit` for part 2 when part 1 ends with fewer rows. With
+// the plain statements, it returns the rows that it changed. A count below
+// `limit` means that no row is left in either part. The tally of the fields
+// counts the rows of both parts.
 //
 // Known limits. A run that takes a wall clock that is ahead takes a line that
 // is ahead too. Then the rows of that clock keep their fields. A start with
@@ -102,6 +121,12 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // rows younger than the step minus 1 h. With a stored value, the rows up to
 // that value plus 1 h keep their fields.
 //
+// With no clock_jump range, part 1 runs the plain statement. With a range, it
+// reads event_raw_ts after a cursor (see corrected). A row in an event range of
+// a clock_jump row has its ts with the correction of that row (ADR-043). Each
+// read keeps the bound `top`. In that case, a call returns the entries that
+// part 1 read, not the rows that it changed. Part 2 gets the rest of `limit`.
+//
 // With days outside 1 to 30, a zero tPriv, or no `wall`, the step runs no
 // statement. It returns an error.
 func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retentionStep {
@@ -111,17 +136,25 @@ func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retenti
 	}
 	var begun, future bool
 	var line, top int64
+	read := newIndexRead(clearRead)
+	past := (&corrected{
+		kind: eventRows, cutoff: cutoff, act: clearIDsSQL, mem: memFields, reads: []*indexRead{read},
+		plain: func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+			return execCount(ctx, tx, memFields, clearPastSQL, cutoff, top, limit)
+		},
+	}).step()
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 		if !begun {
 			if err := tx.QueryRowContext(ctx, clearTopSQL).Scan(&top); err != nil {
 				return 0, err
 			}
 			line, begun = futureLine(ctx, tx, wall()), true
+			read.tail = []any{top}
 		}
 		n := 0
 		if !future {
 			var err error
-			if n, err = execCount(ctx, tx, memFields, clearPastSQL, cutoff, top, limit); err != nil || n == limit {
+			if n, err = past(ctx, tx, limit); err != nil || n == limit {
 				return n, err
 			}
 			future = true
@@ -133,9 +166,14 @@ func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retenti
 
 // newRawDeleteStep returns the step that deletes the refused and beacon rows
 // with ts before the cutoff (SEC-39). The cutoff is tDel minus `days` x 24 h.
-// It rolls up no row. It reads no clock. Each call deletes at most `limit`
-// rows and returns their count. With days outside 1 to 30, or a zero tDel, the
-// step runs no statement and returns an error.
+// With days = 1, the DB cap sets the cutoff to the end of a UTC day (see
+// dayCut). It rolls up no row. It reads no clock. Each call deletes at most
+// `limit` rows and returns their count. With days outside 1 to 30, or a zero
+// tDel, the step runs no statement and returns an error.
+//
+// The step has no clock_jump correction. The DB cap uses it. The cap evicts by
+// the oldest UTC day in stored time. A correction would keep a row that a
+// range moves after that day, and the cap would evict no row.
 func newRawDeleteStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
 	if !ok {
@@ -144,6 +182,27 @@ func newRawDeleteStep(tDel time.Time, days int) retentionStep {
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 		return execCount(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
 	}
+}
+
+// newJumpRawDeleteStep is newRawDeleteStep with the clock_jump correction. The
+// retention run uses it. With no clock_jump range, it runs the plain statement.
+// With a range, it reads event_kind_ts after a cursor for each kind (see
+// corrected). A row in an event range of a clock_jump row has its ts with the
+// correction of that row (ADR-043). In that case, a call returns the entries
+// that it read.
+func newJumpRawDeleteStep(tDel time.Time, days int) retentionStep {
+	cutoff, ok := rollupCutoff(tDel, days)
+	if !ok {
+		return rollupRefused
+	}
+	c := &corrected{
+		kind: eventRows, cutoff: cutoff, act: deleteEventIDsSQL, mem: memDeleted,
+		plain: newRawDeleteStep(tDel, days),
+	}
+	for _, kind := range rawKinds {
+		c.reads = append(c.reads, newIndexRead(rawRead, kind))
+	}
+	return c.step()
 }
 
 // mintRanges returns the unit ranges, both ends included, of the units before
