@@ -129,31 +129,39 @@ pinned toolchain as CI:
 ```sh
 docker build -t cyba-phantom-dev -f .devcontainer/Dockerfile \
   --build-arg VULNDB_FETCHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .devcontainer
-docker run --rm -v "$PWD":/src:ro -v cyba-phantom-gomod:/go/pkg/mod -w /src \
-  cyba-phantom-dev sh -c "go mod download && go mod tidy -diff"
+docker run --rm -e GOPROXY=https://proxy.golang.org -v "$PWD":/src:ro \
+  -v cyba-phantom-modules:/go/pkg/mod -w /src cyba-phantom-dev \
+  sh -c "go mod download && go mod tidy -diff && go mod verify"
 docker run --rm --init --network=none -v "$PWD":/src \
-  -v cyba-phantom-gomod:/go/pkg/mod -w /src cyba-phantom-dev make all
+  -v cyba-phantom-modules:/go/pkg/mod:ro -w /src cyba-phantom-dev make all
 ```
 
-The first `docker run` has network. It fills the volume `cyba-phantom-gomod`
-with the Go modules. Both commands are needed:
-`go mod download` does not fetch the modules that `go mod tidy -diff` needs
-for the tests of the dependencies. The second `docker run` has no network
-and reads the modules from the volume. Run the first `docker run` again after
-a change to `go.mod` or `go.sum`. Without it, a go command in the container
-fails with a network error.
+The first `docker run` has network. It fills the volume `cyba-phantom-modules`
+with the Go modules, from the module proxy only. It runs three go commands.
+`go mod download` and `go mod tidy -diff` are both needed: `go mod download`
+does not fetch the modules that `go mod tidy -diff` needs for the tests of the
+dependencies. `go mod verify` checks the modules in the volume against their
+checksums. The second `docker run` has no network and mounts the volume
+read-only, so a test cannot change a module. Run the first `docker run` again
+after a change to `go.mod` or `go.sum`. Without it, a go command in the
+container fails with a network error. If `go mod verify` reports that a
+module "has been modified", or the first `docker run` fails with "dir has been
+modified", remove the volume with `docker volume rm cyba-phantom-modules` and
+run the first `docker run` again.
 
 (Or open the folder with the Dev Containers extension, which uses
 `.devcontainer/devcontainer.json`. The container has no network. Run the
-first `docker run` before you open the folder, because the extension mounts
-the same volume. To fetch a new vulnerability database copy there, rebuild
-the container without the build cache.)
+`docker build` line and the first `docker run` before you open the folder,
+because the extension mounts the same volume. The container mounts the volume
+read-only. To fetch a new vulnerability database copy there, rebuild the
+container without the build cache.)
 
 Two steps need the network: the module download and the fetch of the
 vulnerability database copy. Both run before the container starts. The first
 `docker run` fills the volume with the modules. The image build fetches the
-database copy, and `make check` reads it from the image. Thus each make target
-runs with the network cut, and no target loses its check.
+database copy, and `make check` reads it from the image. `make all` and
+`make check` ran with the network cut and made no network request. Other make
+targets were not run with the network cut.
 
 `make all` runs build, lint, `go mod tidy -diff`, the coverage gate and
 `make perf`. The coverage gate runs
