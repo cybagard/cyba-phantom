@@ -29,8 +29,8 @@ var (
 
 // ErrMayBeRenamed is not a step. A *WriteError matches it when the new file
 // can already be under its final name. The rename, the link and each step
-// after them match it. The removal of a temporary file matches it only when it
-// comes after a link.
+// after them match it, except ErrExist: that link made no name. The removal of
+// a temporary file matches it only when it comes after a link.
 var ErrMayBeRenamed = errors.New("safefile: write: new file may be in place")
 
 // WriteError is the failure of one step of a write. Its text is the fixed text
@@ -197,8 +197,8 @@ func SyncDir(root *os.Root, dir string, r Rule) error {
 
 // TempName is the rule for the name of the temporary file. TempFixed is for
 // one writer of the name. The caller must not use "<name>.tmp" for other data:
-// WriteTemp and Replace remove it. No code here removes a leftover TempRandom
-// file. The caller sweeps its prefix at its open.
+// WriteTemp, Replace and CreateNew remove it. No code here removes a leftover
+// TempRandom file. The caller sweeps its prefix at its open.
 type TempName uint8
 
 // The temporary names.
@@ -216,9 +216,9 @@ type WriteRule struct {
 	// leftover file. The caller sweeps this prefix at its open.
 	Prefix string
 
-	NoDirSync bool         // Replace does not sync the directory
+	NoDirSync bool         // Replace and CreateNew do not sync the directory
 	Dir       Rule         // the rule for the directory of the name
-	Check     func() error // Replace only: runs before the rename
+	Check     func() error // Replace only; CreateNew refuses it
 }
 
 // valid is false for the zero rule and for each value that is not defined.
@@ -252,7 +252,7 @@ func (w WriteRule) valid() bool {
 // OpenRoot refuses gives ErrCreate with the refusal as its cause. seam.Crash is
 // no *WriteError: it returns at once, with no removal.
 func WriteTemp(root *os.Root, name string, data []byte, w WriteRule) (string, error) {
-	return write(root, name, data, w, false)
+	return write(root, name, data, w, opTemp)
 }
 
 // Replace is WriteTemp, then w.Check when it is set, then the rename of the
@@ -263,11 +263,57 @@ func WriteTemp(root *os.Root, name string, data []byte, w WriteRule) (string, er
 // only its system error. The error then also matches each error that the
 // check error wraps, for example ErrRule or ErrName.
 func Replace(root *os.Root, name string, data []byte, w WriteRule) error {
-	_, err := write(root, name, data, w, true)
+	_, err := write(root, name, data, w, opReplace)
 	return err
 }
 
-func write(root *os.Root, name string, data []byte, w WriteRule, replace bool) (string, error) {
+// CreateNew is WriteTemp, then the link of name to the temporary file with
+// Root.Link. Then it removes the temporary name. Then it syncs the open
+// directory, unless w.NoDirSync. It never replaces an entry at name.
+//
+// A nil root, an invalid rule and a rule with w.Check set give ErrRule. A bad
+// name gives ErrName. Both are *Error values, and nothing is made.
+//
+// An entry at name gives a *WriteError with the step ErrExist. The entry can
+// be a file, a directory, a link or a dangling link. The cause is the system
+// error, and After is false. The error does not match ErrLink or
+// ErrMayBeRenamed. The entry and the target of a link stay as they were.
+// Nothing is made at the target of a dangling link. The temporary file is
+// removed. A failed removal is joined to the error.
+//
+// Another link failure gives ErrLink, and the temporary file is removed. A
+// failure of a step before the link makes no name. A temporary file that the
+// call made is then removed. In both cases a failed removal of that file is
+// joined to the error. With TempFixed, the removal of an old temporary file
+// comes first. Its failure gives ErrTempRemove alone, and the old file stays.
+//
+// After a good link, a failed removal of the temporary name gives
+// ErrTempRemove with After true. Then the directory sync runs, unless
+// w.NoDirSync, and its error is joined. A failed directory sync gives
+// ErrDirSync. In both cases name holds the new data. seam.Crash returns at
+// once, with no later step and no removal.
+//
+// Until the removal, name and the temporary name are two links to one file.
+// After a crash or a failed removal there, a reader that permits one link
+// refuses name. With TempFixed, the next write of name removes the leftover
+// temporary name. With TempRandom, the caller must remove it, for example in
+// its sweep of the prefix.
+func CreateNew(root *os.Root, name string, data []byte, w WriteRule) error {
+	if w.Check != nil {
+		return fail(ErrRule, nil)
+	}
+	_, err := write(root, name, data, w, opCreate)
+	return err
+}
+
+// The kinds of write. WriteTemp stops after the temporary file.
+const (
+	opTemp = iota
+	opReplace
+	opCreate
+)
+
+func write(root *os.Root, name string, data []byte, w WriteRule, op int) (string, error) {
 	if root == nil || !w.valid() {
 		return "", fail(ErrRule, nil)
 	}
@@ -286,8 +332,12 @@ func write(root *os.Root, name string, data []byte, w WriteRule, replace bool) (
 	defer release()
 	h := hooks()
 	tmp, err := stage(h, d, ps[len(ps)-1], data, w)
-	if err == nil && replace {
+	switch {
+	case err != nil:
+	case op == opReplace:
 		err = publish(h, d, dir, tmp, ps[len(ps)-1], w)
+	case op == opCreate:
+		err = create(h, d, dir, tmp, ps[len(ps)-1], w)
 	}
 	if err != nil {
 		return "", err
@@ -387,4 +437,30 @@ func publish(h *seam.Hooks, d *os.Root, dir, tmp, base string, w WriteRule) erro
 		return nil
 	}
 	return syncRoot(d, dir)
+}
+
+// create runs the link, the removal of the temporary name and the directory
+// sync of CreateNew.
+func create(h *seam.Hooks, d *os.Root, dir, tmp, base string, w WriteRule) error {
+	err := runStep(h, "link", tmp, false, func() error { return d.Link(tmp, base) })
+	if err != nil {
+		var we *WriteError
+		if errors.As(err, &we) && errors.Is(we.Cause, fs.ErrExist) {
+			we.Step = ErrExist // an entry is at the name: no link was made
+		}
+		return discard(h, d, tmp, err)
+	}
+	// The new name is in place. The sync runs also when the removal fails.
+	err = runStep(h, "remove", tmp, true, removeFn(d, tmp))
+	if errors.Is(err, seam.Crash) || w.NoDirSync {
+		return err
+	}
+	serr := syncRoot(d, dir)
+	switch {
+	case err == nil || errors.Is(serr, seam.Crash):
+		return serr
+	case serr == nil:
+		return err
+	}
+	return errors.Join(err, serr)
 }
