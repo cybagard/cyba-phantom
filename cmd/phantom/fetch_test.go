@@ -49,10 +49,12 @@ type fakeFetch struct {
 
 func newFakeFetch(t *testing.T) *fakeFetch {
 	f := &fakeFetch{begun: make(chan struct{}, 1), ended: make(chan bool, 1)}
-	old, oldServer, oldLog := newFetcher, newServer, log.Writer()
-	t.Cleanup(func() { newFetcher, newServer = old, oldServer; log.SetOutput(oldLog) })
-	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
-		srv, err := oldServer(c, h)
+	old, oldLog := newFetcher, log.Writer()
+	t.Cleanup(func() { newFetcher = old; log.SetOutput(oldLog) })
+	sm := seamsOf(t)
+	prevServer := sm.newServer
+	sm.newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+		srv, err := seams{newServer: prevServer}.orDefault().newServer(c, h)
 		f.mu.Lock()
 		f.q = c.Queue
 		f.mu.Unlock()
@@ -280,6 +282,12 @@ func TestTU23_StopOrder(t *testing.T) {
 	awaitDone(t, g.r)
 	select {
 	case closed := <-f.ended:
+		f.mu.Lock()
+		captured := f.q != nil
+		f.mu.Unlock()
+		if !captured {
+			t.Error("the newServer seam of the test did not run: no queue was captured")
+		}
 		if closed {
 			t.Error("the queue was closed when the fetcher returned")
 		}
