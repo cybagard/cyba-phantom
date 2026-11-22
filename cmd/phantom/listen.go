@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,7 +77,7 @@ var (
 // Then: the certificate source.
 // Then: WarnExpiry, when there is a static entry.
 // Then: the serve calls.
-// The decoy names are the acme.names entries and then the tls.certs names.
+// serveNames gives the decoy names.
 // c holds the parsed static certificates and roots.
 // With no acme.names entry, no cache opens and no client starts.
 // A static name gets its certificate from c.
@@ -88,9 +87,7 @@ var (
 // A bind error ends the start before the store part opens a file.
 // The stop is the reverse. Both serve calls return. Then the client stops, the cache closes,
 // and the store part closes the queue. Thus no handler adds an event to a closed queue.
-// These close steps run in one goroutine. Serve waits for it at most
-// closeTime. When it does not end, serve writes one fixed line and gives
-// exit 1. The process exit then cuts the close, as a crash does (ADR-041).
+// closeBounded runs these close steps with a time bound (ADR-041).
 // A failure of the state directory, the cache or the client does not end the process.
 // The decoys serve, the sensor writes one fixed line, and the start line says that it is not healthy.
 // A queue error, a bind error, or a decoy server that does not start
@@ -113,11 +110,7 @@ var (
 // error gives one fixed line.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signal, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
-	noAES := !hasHardwareAES()
-	noHardwareAES.Store(noAES)
-	if noAES {
-		fmt.Fprintln(stderr, aesWarning)
-	}
+	noAES := checkAES(stderr)
 	counters := event.NewCounters()
 	depth := cfg.Must("limits.queue_depth")
 	q, err := event.NewQueue(int(depth.Int), counters)
@@ -133,23 +126,11 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	s := start(p, q, d, lg)
 	if line := s.refusal(); line != "" {
 		fmt.Fprintln(stderr, line)
-		httpsLn.Close()
-		httpLn.Close()
-		s.Stop()
+		abortStart(httpsLn, httpLn, nil, nil, s)
 		return 1
 	}
 	b := startBundle(p, s, q, lg)
-	names := cfg.List("acme.names")
-	decoys := slices.Clone(names)
-	acmeNames := make(map[string]bool, len(names))
-	for _, n := range names {
-		if key, ok := normalName(n); ok {
-			acmeNames[key] = true
-		}
-	}
-	for _, e := range c.static {
-		decoys = append(decoys, e.Name)
-	}
+	names, decoys, acmeNames := serveNames(cfg, c)
 	maxConns := cfg.Must("limits.max_conns")
 	headerBytes := cfg.Must("limits.header_bytes")
 	var cache *listener.Store
@@ -174,61 +155,22 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	}, decoyHandler(cfg, b, s, q, decoys))
 	if err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
-		httpsLn.Close()
-		httpLn.Close()
-		s.Stop()
+		abortStart(httpsLn, httpLn, nil, nil, s)
 		return 1
 	}
 	// certmagic writes with the standard log package. Serve drops the text and
 	// does not count it. This runs before the client exists.
 	log.SetOutput(io.Discard)
-	// startCerts opens the cache and starts the client. It returns the fixed line of the first failure, or "".
-	startCerts := func() string {
-		const clientLine = "phantom: certificate client does not start"
-		if s.root == nil {
-			return "phantom: state directory does not open"
-		}
-		if cache, err = listener.Open(s.root, p.CacheDir); err != nil {
-			return "phantom: certificate cache does not open"
-		}
-		ca := cfg.Must("acme.ca")
-		// Load requires acme.email with acme.names. Without it, no client.
-		email, ok := cfg.Get("acme.email")
-		if !ok {
-			return clientLine
-		}
-		addr := httpsLn.Addr().(*net.TCPAddr)
-		if acme, err = newACME(listener.ACMEParams{
-			Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
-			Host: solverHost(addr), Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
-			CARoots: c.roots, CAPrivate: cfg.PrivateList("acme.ca_private"),
-		}); err != nil {
-			acme = nil
-			return clientLine
-		}
-		if startACME(ctx, acme) != nil {
-			return clientLine // The client serves the cached certificates.
-		}
-		return ""
-	}
 	certLine := ""
 	if len(names) > 0 {
-		certLine = startCerts()
+		cache, acme, certLine = startCerts(ctx, cfg, c, p, s, names, httpsLn, stderr)
 	}
 	if certLine != "" {
 		fmt.Fprintln(stderr, certLine)
 	}
 	if source, err = listener.NewCertSource(c.static, acme); err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
-		httpsLn.Close()
-		httpLn.Close()
-		if acme != nil {
-			stopACME(acme)
-		}
-		if cache != nil {
-			cache.Close()
-		}
-		s.Stop()
+		abortStart(httpsLn, httpLn, acme, cache, s)
 		return 1
 	}
 	if len(c.static) > 0 {
@@ -255,49 +197,12 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	// This starts after the last early return of serveWith. Each path that
 	// starts it thus reaches wg.Wait before s.Stop().
 	wg.Go(func() { b.reloadOnSignal(ctx, hup) })
-	startLine := "phantom: started"
-	if !s.Healthy() {
-		startLine += " — store not healthy"
-	}
-	if !b.Healthy() {
-		startLine += " — bundle not healthy"
-	}
-	if noAES {
-		startLine += " — no hardware AES"
-	}
-	if certLine != "" && acme != nil {
-		startLine += " — certificate client start failed"
-	} else if certLine != "" {
-		startLine += " — certificate client did not start"
-	}
-	fmt.Fprintln(stdout, startLine)
+	fmt.Fprintln(stdout, startLine(s, b, noAES, certLine, acme != nil))
 	waitStop(ctx)
 	stop() // A second signal during the stop gets the default action.
-	sctx, cancel := context.WithTimeout(context.Background(), shutdownTime)
-	srv.Shutdown(sctx)
-	cancel()
+	shutdownServers(srv)
 	wg.Wait()
-	closed := make(chan struct{})
-	go func() {
-		defer close(closed)
-		if acme != nil {
-			stopACME(acme)
-		}
-		if cache != nil {
-			cache.Close()
-		}
-		s.Stop()
-	}()
-	timer := time.NewTimer(closeTime)
-	defer timer.Stop()
-	select {
-	case <-closed:
-	case <-timer.C:
-		// The close goes on in its goroutine. The exit cuts it (ADR-041).
-		fmt.Fprintf(stderr, "phantom: close did not end in %v\n", closeTime)
-		return 1
-	}
-	if failed.Load() {
+	if !closeBounded(stderr, clientStop(acme), cache, s) || failed.Load() {
 		return 1
 	}
 	return 0
