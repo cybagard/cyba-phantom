@@ -30,14 +30,6 @@ var suffixes = [...]string{"", "-wal", "-shm", "-journal"}
 // journal has a 512-byte header and one page record of 4 + 4096 + 4 bytes.
 var leftoverMax = [len(suffixes)]int64{4096, 32, math.MaxInt64, 4616}
 
-// syncFile calls fsync on a file and on a directory. A test replaces it to see
-// the order of the steps, or to make a sync fail.
-var syncFile = (*os.File).Sync
-
-// beforeRename is a test hook. Production code leaves it nil. A test sets it to
-// change the file system, or to stop the process, before Open renames the file.
-var beforeRename func()
-
 // removeIfMade removes each of names in dir that is the file with the identity
 // made. An entry that is another file stays.
 func removeIfMade(dir *os.Root, made fs.FileInfo, names ...string) {
@@ -145,11 +137,8 @@ func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo
 	if !os.SameFile(made, fi) {
 		return drop(ruleChanged)
 	}
-	if syncFile(f) != nil {
+	if safefile.SyncFile(f, tmpLast) != nil {
 		return drop(ruleCreate)
-	}
-	if beforeRename != nil {
-		beforeRename()
 	}
 	if _, err := dir.Lstat(last); err == nil {
 		return drop(ruleChanged)
@@ -159,12 +148,7 @@ func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo
 	if dir.Rename(tmpLast, last) != nil {
 		return drop(ruleCreate)
 	}
-	d, err := dir.Open(".")
-	if err == nil {
-		err = syncFile(d)
-		d.Close()
-	}
-	if err != nil {
+	if safefile.SyncDir(dir, ".", dirRule) != nil {
 		return drop(ruleCreate)
 	}
 	return made, f, nil

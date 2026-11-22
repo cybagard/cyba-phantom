@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // markerName is the stop marker: an empty file in the state directory. Only the
@@ -17,14 +19,6 @@ const ruleMarkerExists = "stop marker exists"
 // tests for it with errors.Is. StartClock returns it when the marker exists. A
 // caller must not change it.
 var ErrStopMarker error = &Error{Name: writerName, Rule: ruleMarkerExists}
-
-// closeFile closes the marker file and the state directory. openStateDir
-// opens the state directory for its fsync. Both calls of fsync use syncFile.
-// A test replaces these test hooks to make a step fail.
-var (
-	closeFile    = (*os.File).Close
-	openStateDir = (*os.Root).Open
-)
 
 // checkMarker refuses a start while the marker exists. Lstat does not follow a
 // link, so a symlink, a directory, or any other type is a marker. An error that
@@ -49,8 +43,8 @@ func makeMarker(root *os.Root) error {
 	}
 	f, err := root.OpenFile(markerName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
-		err = syncFile(f)
-		if e := closeFile(f); err == nil {
+		err = safefile.SyncFile(f, markerName)
+		if e := safefile.CloseFile(f, markerName); err == nil {
 			err = e
 		}
 	} else if errors.Is(err, fs.ErrExist) {
@@ -59,12 +53,7 @@ func makeMarker(root *os.Root) error {
 	if err != nil {
 		return err
 	}
-	d, err := openStateDir(root, ".")
-	if err != nil {
-		return err
-	}
-	defer closeFile(d)
-	return syncFile(d)
+	return safefile.SyncDir(root, ".", dirRule)
 }
 
 // ensureMarker makes the marker once. If it fails, it logs one line, and the
