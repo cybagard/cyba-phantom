@@ -72,7 +72,7 @@ func (e *WriteError) Unwrap() []error {
 }
 
 // writeFail makes the error of a failed step. A path error and a link error
-// lose their paths. Only the cause itself is looked at. An error that wraps
+// lose their paths. It looks only at the cause itself. An error that wraps
 // one keeps all that it wraps, so a refusal inside it still matches.
 func writeFail(step, cause error, after bool) error {
 	switch e := cause.(type) {
@@ -197,7 +197,8 @@ func SyncDir(root *os.Root, dir string, r Rule) error {
 
 // TempName is the rule for the name of the temporary file. TempFixed is for
 // one writer of the name. The caller must not use "<name>.tmp" for other data:
-// WriteTemp and Replace remove it.
+// WriteTemp and Replace remove it. No code here removes a leftover TempRandom
+// file. The caller sweeps its prefix at its open.
 type TempName uint8
 
 // The temporary names.
@@ -208,9 +209,13 @@ const (
 
 // WriteRule is the rule of one writer. The zero value is refused with ErrRule.
 type WriteRule struct {
-	Mode      fs.FileMode  // exact permission bits of the new file
-	Temp      TempName     // how the temporary file is named
-	Prefix    string       // TempRandom only: not empty, with no slash
+	Mode fs.FileMode // exact permission bits of the new file
+	Temp TempName    // how the temporary file is named
+
+	// TempRandom only: not empty, with no slash. No code here removes a
+	// leftover file. The caller sweeps this prefix at its open.
+	Prefix string
+
 	NoDirSync bool         // Replace does not sync the directory
 	Dir       Rule         // the rule for the directory of the name
 	Check     func() error // Replace only: runs before the rename
@@ -240,10 +245,12 @@ func (w WriteRule) valid() bool {
 // removes the temporary file that it made. A failed removal adds ErrTempRemove
 // to the error.
 //
-// A failed step gives a *WriteError. A nil root or an invalid rule gives
-// ErrRule. A name that OpenRoot does not accept gives ErrName. ErrRule and
-// ErrName are *Error values. seam.Crash is no *WriteError: it returns at once,
-// with no removal.
+// A failed step gives an error that matches the step. errors.As finds its
+// *WriteError. After a failed removal, the error also matches ErrTempRemove.
+// ErrRule and ErrName come only from the arguments: a nil root, an invalid
+// rule, or the form of the name. Both are *Error values. A directory part that
+// OpenRoot refuses gives ErrCreate with the refusal as its cause. seam.Crash is
+// no *WriteError: it returns at once, with no removal.
 func WriteTemp(root *os.Root, name string, data []byte, w WriteRule) (string, error) {
 	return write(root, name, data, w, false)
 }
@@ -252,7 +259,8 @@ func WriteTemp(root *os.Root, name string, data []byte, w WriteRule) (string, er
 // temporary file over name. Then it syncs the open directory, unless
 // w.NoDirSync. A failure before the rename keeps the old file. An error that
 // matches ErrMayBeRenamed can leave the new file in place. ErrCheck holds the
-// error of w.Check as its cause.
+// error of w.Check as its cause. A top-level path error or link error keeps
+// only its system error.
 func Replace(root *os.Root, name string, data []byte, w WriteRule) error {
 	_, err := write(root, name, data, w, true)
 	return err
@@ -289,6 +297,17 @@ func write(root *os.Root, name string, data []byte, w WriteRule, replace bool) (
 	return tmp, nil
 }
 
+// removeFn gives the function that removes name in d. A missing file is not an
+// error.
+func removeFn(d *os.Root, name string) func() error {
+	return func() error {
+		if err := d.Remove(name); !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+}
+
 // discard removes the temporary file after the failure err. It gives err, or
 // seam.Crash when a crash stops the removal. After a crash it removes nothing.
 // A failed removal gives err and the removal error together. A missing file is
@@ -297,12 +316,7 @@ func discard(h *seam.Hooks, d *os.Root, tmp string, err error) error {
 	if errors.Is(err, seam.Crash) {
 		return err
 	}
-	rerr := runStep(h, "remove", tmp, false, func() error {
-		if err := d.Remove(tmp); !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		return nil
-	})
+	rerr := runStep(h, "remove", tmp, false, removeFn(d, tmp))
 	if errors.Is(rerr, seam.Crash) {
 		return rerr
 	}
@@ -317,12 +331,7 @@ func stage(h *seam.Hooks, d *os.Root, base string, data []byte, w WriteRule) (st
 	tmp := w.Prefix
 	if w.Temp == TempFixed {
 		tmp = base + ".tmp"
-		err := runStep(h, "remove", tmp, false, func() error {
-			if err := d.Remove(tmp); !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-			return nil
-		})
+		err := runStep(h, "remove", tmp, false, removeFn(d, tmp))
 		if err != nil {
 			return "", err
 		}

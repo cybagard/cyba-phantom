@@ -477,7 +477,7 @@ func TestTS38_SyncDirRootRule(t *testing.T) {
 	}
 }
 
-// The directory is swapped for a link after OpenRoot has checked it and
+// The test swaps the directory for a link after OpenRoot has checked it and
 // before the sync. A sync that opens the directory by path again syncs the
 // directory behind the link. An absolute link makes such a reopen fail. A
 // relative link inside the root lets it pass, so the test checks the open
@@ -1071,6 +1071,49 @@ func TestTS38_ReplaceFailedCleanupKeepsBothErrors(t *testing.T) {
 				t.Errorf("f = %q, want OLD", got)
 			}
 		})
+	}
+}
+
+// After a failed step and a failed removal, errors.As finds the step first.
+func TestTS38_ReplaceFailedCleanupFindsStepFirst(t *testing.T) {
+	r, _ := privateRoot(t)
+	failed := false
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+		switch {
+		case step == "write":
+			failed = true
+			return syscall.ENOSPC
+		case step == "remove" && failed:
+			return syscall.EIO
+		}
+		return nil
+	}})
+	err := Replace(r, "f", []byte("new"), randomRule)
+	var we *WriteError
+	if !errors.As(err, &we) || we.Step != ErrWrite {
+		t.Errorf("errors.As step = %v, want ErrWrite", we)
+	}
+	if !errors.Is(err, ErrTempRemove) {
+		t.Errorf("err = %v, want ErrTempRemove too", err)
+	}
+}
+
+func TestTS38_WriteTempDoesNotCallCheck(t *testing.T) {
+	r, _ := privateRoot(t)
+	calls := 0
+	w := fixedRule
+	w.Check = func() error { calls++; return nil }
+	if _, err := WriteTemp(r, "f", []byte("data"), w); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Errorf("WriteTemp called Check %d times, want 0", calls)
+	}
+	if err := Replace(r, "f", []byte("data"), w); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("Replace called Check %d times, want 1", calls)
 	}
 }
 

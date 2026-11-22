@@ -41,11 +41,10 @@ func main() {
 `
 
 // The program runs Set in another process, which the test cache cannot see.
-// This reference makes the test depend on package safefiletest, so a change to
-// Set runs the test again.
-var _ = safefiletest.Set
-
+// The test logs the address of Set. The linker keeps Set in the test binary,
+// so a change to Set changes the binary and runs the test again.
 func TestTS23_SetFailsOutsideTestBinary(t *testing.T) {
+	t.Logf("Set is at %p", safefiletest.Set)
 	goTool, err := exec.LookPath("go")
 	if err != nil {
 		t.Fatal(err)
