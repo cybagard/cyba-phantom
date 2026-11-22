@@ -282,8 +282,10 @@ func Replace(root *os.Root, name string, data []byte, w WriteRule) error {
 // removed. A failed removal is joined to the error.
 //
 // Another link failure gives ErrLink, and the temporary file is removed. A
-// failure of a step before the link makes no name, and the temporary file is
-// removed. In both cases a failed removal is joined to the error.
+// failure of a step before the link makes no name. A temporary file that the
+// call made is then removed. In both cases a failed removal of that file is
+// joined to the error. With TempFixed, the removal of an old temporary file
+// comes first. Its failure gives ErrTempRemove alone, and the old file stays.
 //
 // After a good link, a failed removal of the temporary name gives
 // ErrTempRemove with After true. Then the directory sync runs, unless
