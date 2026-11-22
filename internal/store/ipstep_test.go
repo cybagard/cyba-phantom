@@ -237,9 +237,9 @@ func TestTU11IPStepUsesTheLimitOfTheRunner(t *testing.T) {
 }
 
 // T-U-27: the step takes the largest rowid at its first call. After the first
-// call, 2 sessions before the cutoff are written. Both keep their addresses.
-// The next call returns 2, below the limit, so the step ends. A new step, as in
-// the next run, clears them.
+// call, the test writes 2 sessions before the cutoff. Both keep their
+// addresses. The next call returns 2, below the limit, so the step ends. A new
+// step, as in the next run, clears them.
 func TestTU27IPStepChangesNoRowAboveTheFirstCallRowid(t *testing.T) {
 	db := migrated(t)
 	addSessions(t, db, "old", 0, 6, 1, 1, "192.0.2.1")

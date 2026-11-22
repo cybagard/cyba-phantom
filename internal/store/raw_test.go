@@ -139,9 +139,9 @@ func TestTU27FieldClearCountAndOrder(t *testing.T) {
 }
 
 // T-U-27: the step takes the largest id at its first call. After the first
-// call, 2 rows before the cutoff are written. Both keep their fields. The next
-// call returns 2, below the limit, so the step ends. A new step, as in the next
-// run, clears them.
+// call, the test writes 2 rows before the cutoff. Both keep their fields. The
+// next call returns 2, below the limit, so the step ends. A new step, as in the
+// next run, clears them.
 func TestTU27FieldClearChangesNoRowAboveTheFirstCallRowid(t *testing.T) {
 	db := migrated(t)
 	addFull(t, db, "request", 6, 1, 1)
