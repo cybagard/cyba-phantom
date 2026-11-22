@@ -38,7 +38,8 @@ type jumpSums struct {
 	// overlap, and they cover all rowids.
 	segs []segment
 	// grace holds the rows with an `at` test. An entry takes the j of a grace
-	// row when its rowid is in the range. Its time must also be before `at`.
+	// row when its rowid is in the range. The entry time must also be before
+	// `at`.
 	grace []graceRow
 	// low is the smallest sum that any row can get, at most 0. It takes each
 	// negative j of a grace row as if its test were true.
