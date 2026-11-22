@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,15 +40,12 @@ func rawText(tb testing.TB, db *sql.DB, q string) (s string) {
 	return s
 }
 
-// rollWall is the wall clock of a step test. It always gives rollTDel.
-func rollWall() time.Time { return rollTDel }
-
 // T-U-11: a row with ts before the cutoff has the three fields NULL, also a
 // callback row with a record. A row at the cutoff or after it keeps them. The
 // step writes no meta key. A run with a later cutoff clears a row that has a
 // value again.
 func TestTU11FieldClearBeforeTheCutoff(t *testing.T) {
-	r, chunks := rollRig(t, newFieldClearStep(rollTDel, rollWall, 30))
+	r, chunks := rollRig(t, newFieldClearStep(rollTDel, 30))
 	cut := rollCutoff(30)
 	for _, k := range []string{"callback", "request"} {
 		for _, d := range []int64{-10_000, -1, 0, 1000} {
@@ -66,7 +62,7 @@ func TestTU11FieldClearBeforeTheCutoff(t *testing.T) {
 	}
 	mustExec(t, r.db, "UPDATE event SET body_prefix = x'62' WHERE ts = ?", cut-1)
 	later := rollTDel.Add(time.Hour)
-	runAgain(t, r, newFieldClearStep(later, rollWall, 30))
+	runAgain(t, r, newFieldClearStep(later, 30))
 	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
 		t.Fatalf("%d rows with a value after the run with a later cutoff, want 0", n)
 	}
@@ -76,7 +72,7 @@ func TestTU11FieldClearBeforeTheCutoff(t *testing.T) {
 // one of the three fields is cleared and counted. A row with none is skipped,
 // so the count is 3 and not 4.
 func TestTU11FieldClearFilterHasThreeTerms(t *testing.T) {
-	r, _ := rollRig(t, newFieldClearStep(rollTDel, rollWall, 30))
+	r, _ := rollRig(t, newFieldClearStep(rollTDel, 30))
 	mustExec(t, r.db, "INSERT INTO event (ts, kind, body_prefix) VALUES (10, 'request', x'62')")
 	mustExec(t, r.db, "INSERT INTO event (ts, kind, detail) VALUES (11, 'request', '{}')")
 	mustExec(t, r.db, "INSERT INTO event (ts, kind, record, hash, leaf_index) VALUES (12, 'callback', x'7b7d', zeroblob(32), 1)")
@@ -85,7 +81,7 @@ func TestTU11FieldClearFilterHasThreeTerms(t *testing.T) {
 	ctx := context.WithValue(context.Background(), tallyKey{}, &tl)
 	tx, err := r.db.Begin()
 	check(t, err)
-	if _, err := newFieldClearStep(rollTDel, rollWall, 30)(ctx, tx, chunkRows); err != nil {
+	if _, err := newFieldClearStep(rollTDel, 30)(ctx, tx, chunkRows); err != nil {
 		t.Fatal(err)
 	}
 	check(t, tx.Commit())
@@ -113,7 +109,7 @@ func callTally(t *testing.T, db *sql.DB, step retentionStep, limit int) (n, fiel
 // of 1 000, 1 000 and 502. The last call returns 502, below the limit, as no
 // row is left.
 func TestTU11FieldClearManyRowsWithOneTS(t *testing.T) {
-	r, chunks := rollRig(t, newFieldClearStep(rollTDel, rollWall, 30))
+	r, chunks := rollRig(t, newFieldClearStep(rollTDel, 30))
 	cut := rollCutoff(30)
 	addFull(t, r.db, "request", 2500, 5, 0)
 	for _, ts := range []int64{0, cut - 1, cut} {
@@ -125,22 +121,16 @@ func TestTU11FieldClearManyRowsWithOneTS(t *testing.T) {
 	}
 }
 
-// T-U-27: 3 rows before the cutoff, 5 after the future line, and a limit of 4.
-// Part 1 comes first. The first call clears the 3 rows and 1 row of part 2, and
-// returns 4, not 3. The next calls return 4 and 0. The fields count is the
-// rows of both parts.
-func TestTU27FieldClearTwoPartsCountAndOrder(t *testing.T) {
+// T-U-27: 5 rows before the cutoff and a limit of 4. The first call clears 4
+// rows and counts 4. The second call clears the last row, and returns 1, below
+// the limit. The third call returns 0. The fields count is the rows changed.
+func TestTU27FieldClearCountAndOrder(t *testing.T) {
 	db := migrated(t)
-	addFull(t, db, "request", 3, 1, 1)
-	addFull(t, db, "request", 5, rollTDel.UnixMilli()+2*3_600_000, 1)
-	step := newFieldClearStep(rollTDel, rollWall, 30)
-	n, fields := callTally(t, db, step, 4)
-	if old := count(t, db, "SELECT count(*) FROM event WHERE ts < 100 AND "+rawFull); n != 4 || fields != 4 || old != 0 {
-		t.Fatalf("first call returned %d, fields %d, %d old rows keep a value; want 4, 4 and 0", n, fields, old)
-	}
-	for i, want := range []int{4, 0} {
+	addFull(t, db, "request", 5, 1, 1)
+	step := newFieldClearStep(rollTDel, 30)
+	for i, want := range []int{4, 1, 0} {
 		if n, fields := callTally(t, db, step, 4); n != want || fields != want {
-			t.Fatalf("call %d returned %d, fields %d; want %d", i+2, n, fields, want)
+			t.Fatalf("call %d returned %d, fields %d; want %d", i+1, n, fields, want)
 		}
 	}
 	if n := count(t, db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
@@ -149,91 +139,27 @@ func TestTU27FieldClearTwoPartsCountAndOrder(t *testing.T) {
 }
 
 // T-U-27: the step takes the largest id at its first call. After the first
-// call, one row before the cutoff and one after the line are written. Both
-// keep their fields. The last call returns 1, so the step ends.
+// call, 2 rows before the cutoff are written. Both keep their fields. The next
+// call returns 2, below the limit, so the step ends. A new step, as in the next
+// run, clears them.
 func TestTU27FieldClearChangesNoRowAboveTheFirstCallRowid(t *testing.T) {
 	db := migrated(t)
-	late := rollTDel.UnixMilli() + 40*24*3_600_000
 	addFull(t, db, "request", 6, 1, 1)
-	addFull(t, db, "request", 3, late, 1)
-	step := newFieldClearStep(rollTDel, rollWall, 30)
+	step := newFieldClearStep(rollTDel, 30)
 	if n := callWithin(t, db, step, 4); n != 4 {
 		t.Fatalf("first call returned %d, want 4", n)
 	}
-	addFull(t, db, "request", 1, 1, 0)
-	addFull(t, db, "request", 1, late, 0)
-	for i, want := range []int{4, 1} {
+	addFull(t, db, "request", 2, 1, 0)
+	for i, want := range []int{2, 0} {
 		if n := callWithin(t, db, step, 4); n != want {
 			t.Fatalf("call %d returned %d, want %d", i+2, n, want)
 		}
 	}
-	if n := count(t, db, "SELECT count(*) FROM event WHERE id > 9 AND "+rawFull); n != 2 || count(t, db, "SELECT count(*) FROM event WHERE "+rawFull) != 2 {
+	if n := count(t, db, "SELECT count(*) FROM event WHERE id > 6 AND "+rawFull); n != 2 || count(t, db, "SELECT count(*) FROM event WHERE "+rawFull) != 2 {
 		t.Fatalf("%d new rows keep a value, want 2 and no other row", n)
 	}
-}
-
-// T-U-27: the future line is the later of the wall time and the stored
-// retention_check, plus 1 h. A row at the line keeps its fields. A row 1 ms
-// after it loses them. A bad value or a failed read gives the wall time alone.
-func TestTU27FieldClearFutureLine(t *testing.T) {
-	w := rollTDel.UnixMilli()
-	for _, c := range []struct {
-		name, prep string
-		stored     any
-		line       int64 // the ts that keeps its fields; 0: no row is future
-	}{
-		{"no value", "", nil, w + 3_600_000},
-		{"after the wall time", "", w + 7_200_000, w + 10_800_000},
-		{"before the wall time", "", w - 7_200_000, w + 3_600_000},
-		{"bad value", "", "x", w + 3_600_000},
-		{"failed read", "DROP TABLE meta", nil, w + 3_600_000},
-		{"largest value", "", int64(math.MaxInt64), 0},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			db := migrated(t)
-			if c.stored != nil {
-				mustExec(t, db, metaSetSQL, retentionCheckKey, fmt.Sprint(c.stored))
-			}
-			if c.prep != "" {
-				mustExec(t, db, c.prep)
-			}
-			for _, ts := range []int64{c.line - 1, c.line, c.line + 1, w + 100*24*3_600_000} {
-				addFull(t, db, "request", 1, ts, 0)
-			}
-			callWithin(t, db, newFieldClearStep(rollTDel, rollWall, 30), chunkRows)
-			got := rawText(t, db, "SELECT coalesce(group_concat(ts - "+strconv.FormatInt(w, 10)+", ' '), '') FROM (SELECT ts FROM event WHERE "+rawFull+" ORDER BY ts)")
-			want := fmt.Sprintf("%d %d", c.line-1-w, c.line-w)
-			if c.line == 0 {
-				want = fmt.Sprintf("%d", 100*24*3_600_000)
-			}
-			if got != want {
-				t.Fatalf("rows that keep a value (ts - wall) %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-// T-U-27: the step reads the wall time at its first call, not at its
-// construction and not at each call. The clock gives 10 h more at each read,
-// so the line must not move between the two calls.
-func TestTU27FieldClearTakesTheWallTimeAtTheFirstCall(t *testing.T) {
-	db := migrated(t)
-	reads := 0
-	step := newFieldClearStep(rollTDel, func() time.Time {
-		reads++
-		return rollTDel.Add(time.Duration(reads-1) * 10 * time.Hour)
-	}, 30)
-	if reads != 0 {
-		t.Fatalf("%d clock reads at construction", reads)
-	}
-	addFull(t, db, "request", 2, rollTDel.UnixMilli()+2*3_600_000, 1)
-	for i := 0; i < 2; i++ {
-		if n := callWithin(t, db, step, 1); n != 1 {
-			t.Fatalf("call %d returned %d, want 1", i+1, n)
-		}
-	}
-	if n := count(t, db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 || reads != 1 {
-		t.Fatalf("%d rows keep a value, %d clock reads; want 0 and 1", n, reads)
+	if n := callWithin(t, db, newFieldClearStep(rollTDel, 30), 4); n != 2 || count(t, db, "SELECT count(*) FROM event WHERE "+rawFull) != 0 {
+		t.Fatalf("the new step changed %d rows, want 2 and no row with a value", n)
 	}
 }
 
@@ -244,25 +170,24 @@ func TestTU27FieldClearOneCallClearsTheRowAfterClearedRows(t *testing.T) {
 	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 5000)
 		INSERT INTO event (ts, kind) SELECT i, 'request' FROM c`)
 	addFull(t, db, "request", 1, 6000, 0)
-	if n, fields := callTally(t, db, newFieldClearStep(rollTDel, rollWall, 30), 1000); n != 1 || fields != 1 || count(t, db, "SELECT count(*) FROM event WHERE "+rawFull) != 0 {
+	if n, fields := callTally(t, db, newFieldClearStep(rollTDel, 30), 1000); n != 1 || fields != 1 || count(t, db, "SELECT count(*) FROM event WHERE "+rawFull) != 0 {
 		t.Fatalf("one call returned %d, fields %d; want 1, 1 and no row with a field", n, fields)
 	}
 }
 
-// T-U-27: each clear statement names INDEXED BY event_raw_ts and repeats its
-// WHERE text. Each plan uses it, with no SCAN and no temporary B-tree.
-func TestTU27FieldClearUsesTheRawIndexInBothParts(t *testing.T) {
+// T-U-27: the clear statement names INDEXED BY event_raw_ts and repeats its
+// WHERE text. Its plan uses the index, with no SCAN and no temporary B-tree.
+func TestTU27FieldClearUsesTheRawIndex(t *testing.T) {
 	db := migrated(t)
 	def := rawText(t, db, "SELECT sql FROM sqlite_master WHERE name = 'event_raw_ts'")
 	where := def[strings.Index(def, " WHERE ")+len(" WHERE "):]
-	for name, q := range map[string]string{"part 1": clearPastSQL, "part 2": clearFutureSQL} {
-		if !strings.Contains(q, "INDEXED BY event_raw_ts") || !strings.Contains(q, "("+where+")") {
-			t.Fatalf("%s: no INDEXED BY, or no WHERE text %q of the index: %s", name, where, q)
-		}
-		p := strings.Join(queryPlan(t, db, q, 1, 5, 1000), "\n")
-		if !strings.Contains(p, "USING INDEX event_raw_ts (ts") || strings.Contains(p, "SCAN event") || strings.Contains(p, "TEMP B-TREE") {
-			t.Fatalf("plan of %s:\n%s", name, p)
-		}
+	q := clearPastSQL
+	if !strings.Contains(q, "INDEXED BY event_raw_ts") || !strings.Contains(q, "("+where+")") {
+		t.Fatalf("no INDEXED BY, or no WHERE text %q of the index: %s", where, q)
+	}
+	p := strings.Join(queryPlan(t, db, q, 1, 5, 1000), "\n")
+	if !strings.Contains(p, "USING INDEX event_raw_ts (ts") || strings.Contains(p, "SCAN event") || strings.Contains(p, "TEMP B-TREE") {
+		t.Fatalf("plan:\n%s", p)
 	}
 }
 
@@ -303,17 +228,14 @@ func TestTU11RawStepsRefuseBadParameters(t *testing.T) {
 		days        int
 	}{{"0 days", rollTDel, rollTDel, 0}, {"31 days", rollTDel, rollTDel, 31}, {"zero time", time.Time{}, time.Time{}, 30}, {"zero tDel", rollTDel, time.Time{}, 30}} {
 		for i, mk := range []func(tPriv, tDel time.Time, days int) retentionStep{
-			func(tPriv, tDel time.Time, days int) retentionStep {
-				// A zero tDel stands for a clock that is nil.
-				var wall func() time.Time
-				if !tDel.IsZero() {
-					wall = func() time.Time { return tDel }
-				}
-				return newFieldClearStep(tPriv, wall, days)
-			},
+			func(tPriv, _ time.Time, days int) retentionStep { return newFieldClearStep(tPriv, days) },
 			func(_, tDel time.Time, days int) retentionStep { return newRawDeleteStep(tDel, days) },
 			func(_, tDel time.Time, days int) retentionStep { return newMintStep(tDel, days) },
 		} {
+			// The field clear reads tPriv only. A zero tDel does not refuse it.
+			if i == 0 && c.name == "zero tDel" {
+				continue
+			}
 			t.Run(fmt.Sprint(c.name, " step ", i), func(t *testing.T) {
 				r, chunks := rollRig(t, mk(c.tPriv, c.tDel, c.days))
 				addFull(t, r.db, "refused", 1, 1, 0)
@@ -591,7 +513,7 @@ func TestTS34MintCutoffBeforeTheEpochDeletesNothing(t *testing.T) {
 func TestTU11FieldClearTakesRowsInTSOrder(t *testing.T) {
 	db := migrated(t)
 	addFull(t, db, "request", 1500, 2000, -1)
-	step := newFieldClearStep(rollTDel, rollWall, 30)
+	step := newFieldClearStep(rollTDel, 30)
 	if n := callWithin(t, db, step, 1000); n != 1000 ||
 		count(t, db, "SELECT count(*) FROM event WHERE "+rawCleared+" AND ts <= 1500") != 1000 ||
 		count(t, db, "SELECT count(*) FROM event WHERE "+rawCleared) != 1000 {

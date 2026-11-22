@@ -236,6 +236,32 @@ func TestTU11IPStepUsesTheLimitOfTheRunner(t *testing.T) {
 	}
 }
 
+// T-U-27: the step takes the largest rowid at its first call. After the first
+// call, 2 sessions before the cutoff are written. Both keep their addresses.
+// The next call returns 2, below the limit, so the step ends. A new step, as in
+// the next run, clears them.
+func TestTU27IPStepChangesNoRowAboveTheFirstCallRowid(t *testing.T) {
+	db := migrated(t)
+	addSessions(t, db, "old", 0, 6, 1, 1, "192.0.2.1")
+	step := newIPStep(ipTPriv, 7)
+	if n := callWithin(t, db, step, 4); n != 4 {
+		t.Fatalf("first call returned %d, want 4", n)
+	}
+	addSessions(t, db, "new", 0, 2, 1, 0, "192.0.2.2")
+	for i, want := range []int{2, 0} {
+		if n := callWithin(t, db, step, 4); n != want {
+			t.Fatalf("call %d returned %d, want %d", i+2, n, want)
+		}
+	}
+	if got := fmt.Sprint(nullIPs(t, db)); count(t, db, "SELECT count(*) FROM session WHERE ip IS NOT NULL") != 2 ||
+		!strings.Contains(got, "new0:false") || !strings.Contains(got, "new1:false") {
+		t.Fatalf("NULL ip by session %s; want the 2 new sessions to keep an address", got)
+	}
+	if n := callWithin(t, db, newIPStep(ipTPriv, 7), 4); n != 2 || count(t, db, "SELECT count(*) FROM session WHERE ip IS NOT NULL") != 0 {
+		t.Fatalf("the new step changed %d rows, want 2 and no session with an address", n)
+	}
+}
+
 // schemaEntry is one row of sqlite_schema, and the row count of a table.
 type schemaEntry struct {
 	typ, sql string
@@ -342,15 +368,18 @@ func queryPlan(tb testing.TB, db *sql.DB, q string, args ...any) []string {
 // expire step.
 func TestTU11StatementsUseTheirIndexes(t *testing.T) {
 	db := migrated(t)
-	for _, c := range []struct{ q, plan string }{
+	for _, c := range []struct {
+		q, plan string
+		args    []any
+	}{
 		{clearIPSQL, "SEARCH session USING INTEGER PRIMARY KEY (rowid=?)\n" +
 			"LIST SUBQUERY 1\n" +
-			"SEARCH session USING INDEX session_ip_first (first_seen<?)"},
+			"SEARCH session USING INDEX session_ip_first (first_seen<?)", []any{1, 5, 1000}},
 		{deleteTokenSQL, "SEARCH token USING INTEGER PRIMARY KEY (rowid=?)\n" +
 			"LIST SUBQUERY 1\n" +
-			"SEARCH token USING COVERING INDEX token_first_cb (first_cb_at<?)"},
+			"SEARCH token USING COVERING INDEX token_first_cb (first_cb_at<?)", []any{1, 1000}},
 	} {
-		if p := strings.Join(queryPlan(t, db, c.q, 1, 1000), "\n"); p != c.plan {
+		if p := strings.Join(queryPlan(t, db, c.q, c.args...), "\n"); p != c.plan {
 			t.Errorf("plan of %q:\n%s\nwant:\n%s", c.q, p, c.plan)
 		}
 	}

@@ -337,7 +337,7 @@ func TestTU27SStepBackAt0314For10Days(t *testing.T) {
 // wall hook of the writer is 40 d ahead of S, or 40 d behind. The test checks
 // three steps that have rows on both sides of their cutoff of S. These are the
 // address step, the raw delete and the field clear. The rows that stay are
-// those of S.
+// those of S. The field clear also keeps the row 2 d after S.
 func TestTU27SRealStepsTakeEachCutoffFromS(t *testing.T) {
 	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) int64 { return start.Add(-d).UnixMilli() }
@@ -364,7 +364,7 @@ func TestTU27SRealStepsTakeEachCutoffFromS(t *testing.T) {
 			if got, want := rawText(t, k.r.db, fmt.Sprintf(ages, "refused", "")), "25d"; got != want {
 				t.Errorf("refused rows %q, want %q", got, want)
 			}
-			if got, want := rawText(t, k.r.db, fmt.Sprintf(ages, "callback", "AND "+rawFull)), "25d 1d"; got != want {
+			if got, want := rawText(t, k.r.db, fmt.Sprintf(ages, "callback", "AND "+rawFull)), "25d 1d -2d"; got != want {
 				t.Errorf("callback rows with a field %q, want %q", got, want)
 			}
 		})

@@ -649,21 +649,6 @@ func TestTU27FieldClearAfterStartAheadThenRestart(t *testing.T) {
 	}
 }
 
-// T-U-27: after the first run with the right clock, no row written 40 d ahead
-// keeps a field. A run with the wall clock ahead came first.
-func TestTU27FieldClearRowsWrittenWithTheWallClockAhead(t *testing.T) {
-	r, s, f := prodRig(t, 40*oneDay, nil)
-	s.runOnce(context.Background())
-	for _, k := range []string{"callback", "request"} {
-		addFull(t, r.db, k, 1, f.wall().UnixMilli(), 0)
-	}
-	f.jump(-40 * oneDay)
-	s.runOnce(context.Background())
-	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
-		t.Fatalf("%d rows keep a field after the first run with the right clock", n)
-	}
-}
-
 // T-U-27: one run has the wall clock 40 d ahead. Then the clock is right, and
 // a row and a run come each day for 60 d. After each run, no row older than the
 // raw days has a field.
@@ -679,21 +664,5 @@ func TestTU27FieldClearDailyRunsAfterTheWallClockWasAhead(t *testing.T) {
 		if n := count(t, r.db, q); n != 0 {
 			t.Fatalf("%d rows older than the raw days keep a field after the run of day %d", n, day)
 		}
-	}
-}
-
-// T-U-27: the run takes the clock at the first call of the field clear, not at
-// the run start. The clock moves 2 h first, so a row 2 h 30 min later is kept.
-func TestTU27FieldClearTakesTheClockAtItsFirstCall(t *testing.T) {
-	r, s, f := prodRig(t, 0, nil)
-	run := s.run
-	s.run = func(ctx context.Context, steps []retentionStep) error {
-		f.advance(2 * time.Hour)
-		return run(ctx, steps)
-	}
-	addFull(t, r.db, "callback", 1, rollTDel.Add(150*time.Minute).UnixMilli(), 0)
-	s.runOnce(context.Background())
-	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 1 {
-		t.Fatalf("%d rows keep a field, want 1", n)
 	}
 }
