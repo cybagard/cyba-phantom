@@ -113,7 +113,7 @@ var corrCases = []corrCase{
 		acted: rowGone("event", "id"), mk: func() retentionStep { return newEventExpireStep(rollTDel, 90) },
 		setup: func(tb testing.TB, db *sql.DB) { mustExec(tb, db, metaSetSQL, rollupDoneKey, "9999-12-31") }},
 	// The session delete has no bulk. A row costs 4 of the limit, so the tests
-	// of the read bound do not fit the step. A test of its cost covers the step.
+	// of the read bound do not fit it. A test of its cost covers it.
 	{name: "session delete", days: 90, corrected: true, session: true, seed: seedSession,
 		acted: rowGone("session", "rowid"), mk: func() retentionStep { return newJumpSessionExpireStep(rollTDel, 90) }},
 	{name: "token delete", days: 90, acted: rowGone("token", "session_id"),
@@ -756,12 +756,12 @@ func TestTU30TwoGraceJumpsGiveTwoRowsAndEachRowTakesItsOwnJ(t *testing.T) {
 	if got := ends(t, r.db); got != "2/0 2/0" {
 		t.Fatalf("ends %q, want 2/0 2/0", got)
 	}
-	// Row 1 has the time at1 + 1. It takes only the J of 2 h, so it acts at the
-	// cutoff at1 + 2 h + 2, and not at the cutoff 1 ms before. With no J it acts
-	// at the first cutoff. With both J it stays at the second. Row 2 has the time
-	// at1 - 1. It takes both J, 5 h in all, so it acts at the cutoff at1 + 5 h,
-	// and not at the cutoff 1 ms before. With the first J only, it acts at the
-	// last two cutoffs.
+	// Row 1 has the time at1 + 1 and takes only the J of 2 h. It acts at the
+	// cutoff at1 + 2 h + 2, and not 1 ms before. With no J, it acts at the
+	// first cutoff. With both J, it stays at the second cutoff.
+	// Row 2 has the time at1 - 1 and takes both J, 5 h in all. It acts at the
+	// cutoff at1 + 5 h, and not 1 ms before. With the first J only, it acts at
+	// the last two cutoffs.
 	for _, c := range []struct {
 		cutoff int64
 		left   string
@@ -996,7 +996,7 @@ func TestTU27JumpRowWithJOfZeroChangesNoRow(t *testing.T) {
 // T-U-27, T-U-30: a batch that moves an end writes the key with the rowid floor
 // in the same transaction, with synchronous=FULL. The floor is above the new
 // rowids. A batch with a row at `at` moves no end and writes no key. A batch
-// that rolls back leaves the key, the floor in memory and the ends as they were.
+// that rolls back leaves the key, the floor in memory and the ends unchanged.
 func TestTU30MoveOfAnEndWritesTheKeyWithTheRowidFloor(t *testing.T) {
 	r, f := clockRig(t)
 	moves := 0
@@ -1029,10 +1029,10 @@ func TestTU30MoveOfAnEndWritesTheKeyWithTheRowidFloor(t *testing.T) {
 	}
 }
 
-// T-U-30: an earlier process wrote a grace row with empty ranges and an `at` far
-// ahead. A row in flight is before that `at`, but this process does not move the
-// end of that row. It moves the end of its own grace row, which has the id
-// after the largest id at the start.
+// T-U-30: an earlier process wrote a grace row with empty ranges and an `at`
+// far ahead. A row in flight is before that `at`. This process does not move
+// the end of that row. It moves the end of its own grace row. That row has the
+// id after the largest id at the start.
 func TestTU30EndOfAnEarlierProcessRowDoesNotMove(t *testing.T) {
 	r, f := newRig(t, 8), &fakeSrc{}
 	addGrace(t, r.db, 1, 1, 0, hourMs, math.MaxInt64-1)
@@ -1059,7 +1059,8 @@ func runAtMs(t *testing.T, r *rig, st int64) {
 }
 
 // T-U-11, T-U-30: the run keeps a grace row of its own process that has empty
-// ranges, 100 d after the jump. It deletes an empty row of an earlier process.
+// ranges, 100 d after the jump. The run deletes an empty row of an earlier
+// process.
 func TestTU30ScheduleRunKeepsTheGraceRowOfThisProcess(t *testing.T) {
 	r, f := newRig(t, 8), &fakeSrc{}
 	mustExec(t, r.db, "INSERT INTO clock_jump VALUES (1, 5, 4, 5, 4, 1, 5)")
@@ -1087,10 +1088,10 @@ func TestTU30ScheduleRunDeletesSessionsWithTheCorrection(t *testing.T) {
 	}
 }
 
-// T-U-27: the session delete returns the limit when it read the most entries,
-// also when the limit is not a multiple of 4. Else the run would take the step
-// as done and end the delete early. 300 sessions act. The limit 997 reads 249
-// entries, and the limit 7 reads 1.
+// T-U-27: the session delete returns the limit when it read the most entries.
+// This holds also when the limit is not a multiple of 4. Else the run takes the
+// step as done and ends the delete early. 300 sessions act. The limit 997 reads
+// 249 entries, and the limit 7 reads 1.
 func TestTU27SessionDeleteReturnsTheLimitForALimitThatIsNotAMultipleOf4(t *testing.T) {
 	db := migrated(t)
 	addGrace(t, db, 100, 5000, 5001, hourMs, math.MaxInt64-1)
