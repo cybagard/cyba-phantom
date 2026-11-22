@@ -68,7 +68,8 @@ func serveNames(cfg *config.Config, c content) (names, decoys []string, acmeName
 
 // startCerts opens the cache and starts the client. It returns the cache, the
 // client, and the fixed line of the first failure, or "". The client is nil
-// when it does not exist. The cache is what listener.Open returned.
+// when it does not exist. The cache is what listener.Open returned, or nil
+// when Open did not run.
 func startCerts(ctx context.Context, cfg *config.Config, c content, p startParams, s *storePart, names []string, httpsLn net.Listener, stderr io.Writer) (cache *listener.Store, acme *listener.ACME, line string) {
 	const clientLine = "phantom: certificate client does not start"
 	if s.root == nil {
@@ -134,10 +135,10 @@ func clientStop(acme *listener.ACME) func() {
 // closeBounded stops the certificate client, closes the cache, and stops the
 // store part, in this order. stopClient is the step that stops the client. It
 // skips the client and the cache when they are nil. These close steps run in
-// one goroutine. Serve waits for it at most closeTime. When it does not end,
-// serve writes one fixed line and gives exit 1. The process exit then cuts the
-// close, as a crash does (ADR-041).
-// It returns false when the close did not end in closeTime.
+// one goroutine. closeBounded waits for it at most closeTime. When the close
+// does not end, closeBounded writes one fixed line and returns false. Then
+// serveWith gives exit 1. The process exit then cuts the close, as a crash
+// does (ADR-041).
 func closeBounded(stderr io.Writer, stopClient func(), cache *listener.Store, s *storePart) bool {
 	closed := make(chan struct{})
 	go func() {
