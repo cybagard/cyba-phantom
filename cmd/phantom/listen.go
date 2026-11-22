@@ -202,7 +202,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	stop() // A second signal during the stop gets the default action.
 	shutdownServers(srv)
 	wg.Wait()
-	if !closeBounded(stderr, acme, cache, s) || failed.Load() {
+	if !closeBounded(stderr, clientStop(acme), cache, s) || failed.Load() {
 		return 1
 	}
 	return 0

@@ -32,20 +32,18 @@ func TestCloseBoundedStopsClientBeforeCacheCloses(t *testing.T) {
 		cancel:    func() {},
 		stopSched: func() {},
 	}
-	oldStop := stopACME
-	t.Cleanup(func() { stopACME = oldStop })
 	var calls int
 	var openAtStop bool
-	stopACME = func(*listener.ACME) {
+	stopClient := func() {
 		calls++
 		openAtStop = cache.Store(context.Background(), "probe", []byte("x")) == nil
 	}
 	var stderr bytes.Buffer
-	if !closeBounded(&stderr, &listener.ACME{}, cache, s) {
+	if !closeBounded(&stderr, stopClient, cache, s) {
 		t.Fatalf("close did not end in time; stderr %q", stderr.String())
 	}
 	if calls != 1 {
-		t.Fatalf("stopACME ran %d times, want 1", calls)
+		t.Fatalf("the client stop step ran %d times, want 1", calls)
 	}
 	if !openAtStop {
 		t.Error("the cache was closed before the client stopped")

@@ -122,18 +122,28 @@ func startLine(s *storePart, b *bundlePart, noAES bool, certLine string, acmeSet
 	return line
 }
 
+// clientStop gives the step that calls stopACME for the client. It gives nil
+// when the client does not exist.
+func clientStop(acme *listener.ACME) func() {
+	if acme == nil {
+		return nil
+	}
+	return func() { stopACME(acme) }
+}
+
 // closeBounded stops the certificate client, closes the cache, and stops the
-// store part, in this order. It skips the client and the cache when they are
-// nil. These close steps run in one goroutine. Serve waits for it at most
-// closeTime. When it does not end, serve writes one fixed line and gives
-// exit 1. The process exit then cuts the close, as a crash does (ADR-041).
+// store part, in this order. stopClient is the step that stops the client. It
+// skips the client and the cache when they are nil. These close steps run in
+// one goroutine. Serve waits for it at most closeTime. When it does not end,
+// serve writes one fixed line and gives exit 1. The process exit then cuts the
+// close, as a crash does (ADR-041).
 // It returns false when the close did not end in closeTime.
-func closeBounded(stderr io.Writer, acme *listener.ACME, cache *listener.Store, s *storePart) bool {
+func closeBounded(stderr io.Writer, stopClient func(), cache *listener.Store, s *storePart) bool {
 	closed := make(chan struct{})
 	go func() {
 		defer close(closed)
-		if acme != nil {
-			stopACME(acme)
+		if stopClient != nil {
+			stopClient()
 		}
 		if cache != nil {
 			cache.Close()
