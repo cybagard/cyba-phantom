@@ -293,12 +293,6 @@ func (s *Schedule) runOnce(stop context.Context) {
 // it again. It has no correction here, and it does not step with the wall
 // clock.
 func (s *Schedule) runAt(stop context.Context, st time.Time) {
-	clockNow := func() time.Time {
-		if t, _, err := s.read(); err == nil {
-			return t
-		}
-		return st
-	}
 	ctx, cancel := context.WithTimeout(stop, s.limit)
 	defer cancel()
 	run := &retentionRun{}
@@ -309,7 +303,7 @@ func (s *Schedule) runAt(stop context.Context, st time.Time) {
 	if s.w.clk != nil {
 		known = &s.w.knownJump
 	}
-	steps := runStepsClock(st, clockNow, st, st, s.ip, s.raw, s.events, known)
+	steps := runStepsKnown(st, st, st, s.ip, s.raw, s.events, known)
 	steps = withCap(steps, run, s.w, s.maxBytes, s.dbRel, st, s.capUnmet, s.tune)
 	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
@@ -364,22 +358,17 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // their result. The mark step is last, so a run that ends early writes no
 // retention_last.
 //
-// The time of the run is `st`. The mark step takes it. The field clear also
-// takes it, as its time at its first call. This form is for tests that need no
-// clock. See runStepsClock.
+// The time of the run is `st`. The mark step takes it. This form is for tests
+// that need no clock_jump bound. See runStepsKnown.
 func runSteps(st, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
-	return runStepsClock(st, func() time.Time { return st }, tDel, tPriv, ip, raw, events, nil)
+	return runStepsKnown(st, tDel, tPriv, ip, raw, events, nil)
 }
 
-// runStepsClock is runSteps with a clock. The mark step takes `st`, the S at
-// the start of the run. The field clear takes the time of `clock` at its first
-// call. That call comes after the steps before it, so it can be long after the
-// run start. With the run start, rows that the writer stores in between could
-// lie after the future line. The schedule passes a function that reads S as
-// `clock`. The clock_jump delete reads *known when it runs: the largest
-// clock_jump id at StartClock (see newJumpExpireStep). A nil known gives no
-// protected row.
-func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, ip, raw, events int, known *int64) []retentionStep {
+// runStepsKnown is runSteps with a bound for the clock_jump delete. The mark
+// step takes `st`, the S at the start of the run. The clock_jump delete reads
+// *known when it runs: the largest clock_jump id at StartClock (see
+// newJumpExpireStep). A nil known gives no protected row.
+func runStepsKnown(st, tDel, tPriv time.Time, ip, raw, events int, known *int64) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
@@ -390,7 +379,7 @@ func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, 
 		newTokenExpireStep(tDel, events),
 		newJumpSessionExpireStep(tDel, events),
 		newJumpExpireStep(known),
-		newFieldClearStep(tPriv, clock, raw),
+		newFieldClearStep(tPriv, raw),
 		newMintStep(tDel, raw),
 		markStep(st),
 	}

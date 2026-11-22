@@ -98,7 +98,7 @@ func seedSession(tb testing.TB, db *sql.DB, id, ts int64) {
 
 var corrCases = []corrCase{
 	{name: "field clear", days: 30, corrected: true, seed: seedEvent("request"), bulk: bulkEvent("request"),
-		mk: func() retentionStep { return newFieldClearStep(rollTDel, rollWall, 30) },
+		mk: func() retentionStep { return newFieldClearStep(rollTDel, 30) },
 		acted: func(tb testing.TB, db *sql.DB, id int64) bool {
 			return count(tb, db, fmt.Sprint("SELECT count(*) FROM event WHERE id = ", id, " AND body_prefix IS NULL")) == 1
 		}},
@@ -320,7 +320,7 @@ func TestTU27GraceJumpOf30DaysKeepsTheFieldsUntilTheTrueAge(t *testing.T) {
 		{s, "2 3"}, {wall0 + 60*rawDay + 60_000, "2 3"}, {wall0 + 60*rawDay + 60_001, "3"}, {wall0 + 60*rawDay + 90_000, "3"}, {wall0 + 60*rawDay + 90_001, ""},
 	} {
 		at := time.UnixMilli(c.at)
-		call(t, r.db, newFieldClearStep(at, func() time.Time { return at }, 30), chunkRows)
+		call(t, r.db, newFieldClearStep(at, 30), chunkRows)
 		q := "SELECT coalesce(group_concat(id, ' '), '') FROM (SELECT id FROM event WHERE body_prefix IS NOT NULL ORDER BY id)"
 		if got := rawText(t, r.db, q); got != c.left {
 			t.Fatalf("S = %d ms after the jump: rows with fields %q, want %q", c.at-s, got, c.left)
@@ -520,22 +520,57 @@ func TestTU27EachStepRunsBeforeTheTokenEpoch(t *testing.T) {
 
 // T-U-27: the field clear keeps its bound `top` with a clock_jump row in place.
 // The first call takes the largest rowid, 3. It reads 3 entries, which is its
-// limit, so part 1 is not at its end. A row 4 that the writer stores after it
-// keeps its fields, also when its rowid is in the range.
+// limit, so the read is not at its end. A row 4 that the writer stores after it
+// keeps its fields, also when its rowid is in the range. The next call reads no
+// entry, so the step ends. A new step, as in the next run, clears the row 4.
 func TestTU27FieldClearKeepsItsTopWithAJumpRow(t *testing.T) {
 	db := migrated(t)
 	addJumps(t, db, []testJump{{1, math.MaxInt64, 10}})
 	cutoff := rollCutoff(30)
 	bulkEvent("request")(t, db, 1, 3, cutoff-100)
-	step := newFieldClearStep(rollTDel, rollWall, 30)
+	step := newFieldClearStep(rollTDel, 30)
 	if n := call(t, db, step, 3); n != 3 {
 		t.Fatalf("the first call read %d entries; want 3", n)
 	}
 	bulkEvent("request")(t, db, 4, 4, cutoff-50) // after the cursor
-	call(t, db, step, 1000)
+	if n := call(t, db, step, 1000); n != 0 {
+		t.Fatalf("the next call read %d entries; want 0", n)
+	}
 	if left := count(t, db, "SELECT count(*) FROM event WHERE body_prefix IS NOT NULL"); left != 1 ||
 		count(t, db, "SELECT count(*) FROM event WHERE id = 4 AND body_prefix IS NOT NULL") != 1 {
 		t.Fatalf("%d rows keep their fields; want only the row 4", left)
+	}
+	if n := call(t, db, newFieldClearStep(rollTDel, 30), 1000); n != 1 ||
+		count(t, db, "SELECT count(*) FROM event WHERE body_prefix IS NOT NULL") != 0 {
+		t.Fatalf("the new step read %d entries, want 1 and no row with fields", n)
+	}
+}
+
+// T-U-27: the 7-day step keeps its bound with a clock_jump row in place. The
+// first call takes the largest rowid, 3. It reads 3 entries, which is its
+// limit. A session row 4 that the writer stores after it keeps its address.
+// This holds also when its rowid is in the range. The next call reads no
+// entry, so the step ends. A new step, as in the next run, clears the row 4.
+func TestTU27IPStepKeepsItsTopWithAJumpRow(t *testing.T) {
+	db := migrated(t)
+	addJumps(t, db, []testJump{{1, math.MaxInt64, 10}})
+	cutoff := rollTDel.UnixMilli() - 7*rawDay
+	bulkSession(t, db, 1, 3, cutoff-100)
+	step := newIPStep(rollTDel, 7)
+	if n := call(t, db, step, 3); n != 3 {
+		t.Fatalf("the first call read %d entries; want 3", n)
+	}
+	bulkSession(t, db, 4, 4, cutoff-50) // after the cursor
+	if n := call(t, db, step, 1000); n != 0 {
+		t.Fatalf("the next call read %d entries; want 0", n)
+	}
+	if left := count(t, db, "SELECT count(*) FROM session WHERE ip IS NOT NULL"); left != 1 ||
+		count(t, db, "SELECT count(*) FROM session WHERE rowid = 4 AND ip IS NOT NULL") != 1 {
+		t.Fatalf("%d sessions keep their address; want only the row 4", left)
+	}
+	if n := call(t, db, newIPStep(rollTDel, 7), 1000); n != 1 ||
+		count(t, db, "SELECT count(*) FROM session WHERE ip IS NOT NULL") != 0 {
+		t.Fatalf("the new step read %d entries, want 1 and no session with an address", n)
 	}
 }
 
@@ -614,7 +649,7 @@ func TestTU27ReadStatementsSearchTheirIndexes(t *testing.T) {
 		{"event_ts", eventRead, nil, nil},
 		{"event_kind_ts", rawRead, []any{"refused"}, nil},
 		{"event_raw_ts", clearRead, nil, []any{1}},
-		{"session_ip_first", ipRead, nil, nil},
+		{"session_ip_first", ipRead, nil, []any{1}},
 		{"session_band_last", sessionRead, []any{"human"}, nil},
 	} {
 		eq := slices.Concat(c.lead, []any{1, 1}, c.tail, []any{1000})
