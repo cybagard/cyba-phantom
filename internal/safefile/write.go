@@ -29,8 +29,8 @@ var (
 
 // ErrMayBeRenamed is not a step. A *WriteError matches it when the new file
 // can already be under its final name. The rename, the link and each step
-// after them match it. The removal of a temporary file matches it only when it
-// comes after a link.
+// after them match it, except ErrExist: that link made no name. The removal of
+// a temporary file matches it only when it comes after a link.
 var ErrMayBeRenamed = errors.New("safefile: write: new file may be in place")
 
 // WriteError is the failure of one step of a write. Its text is the fixed text
@@ -282,15 +282,20 @@ func Replace(root *os.Root, name string, data []byte, w WriteRule) error {
 // removed. A failed removal is joined to the error.
 //
 // Another link failure gives ErrLink, and the temporary file is removed. A
-// failure of a step before the link makes no name and keeps no temporary
-// file, as WriteTemp does.
+// failure of a step before the link makes no name, and the temporary file is
+// removed. In both cases a failed removal is joined to the error.
 //
 // After a good link, a failed removal of the temporary name gives
-// ErrTempRemove with After true. The directory sync still runs, and its error
-// is joined. A failed directory sync gives ErrDirSync. In both cases name
-// holds the new data. seam.Crash returns at once, with no later step and no
-// removal. With TempFixed, the next call removes a leftover temporary file
-// first.
+// ErrTempRemove with After true. Then the directory sync runs, unless
+// w.NoDirSync, and its error is joined. A failed directory sync gives
+// ErrDirSync. In both cases name holds the new data. seam.Crash returns at
+// once, with no later step and no removal.
+//
+// Until the removal, name and the temporary name are two links to one file.
+// After a crash or a failed removal there, a reader that permits one link
+// refuses name. With TempFixed, the next write of name removes the leftover
+// temporary name. With TempRandom, the caller must remove it, for example in
+// its sweep of the prefix.
 func CreateNew(root *os.Root, name string, data []byte, w WriteRule) error {
 	if w.Check != nil {
 		return fail(ErrRule, nil)
