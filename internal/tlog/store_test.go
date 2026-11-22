@@ -1699,6 +1699,60 @@ func TestTU07FailedTileDirectorySyncForgetsTheSyncedDirectories(t *testing.T) {
 	}
 }
 
+// T-U-07: a stale file of width 5 is in drop after a write of width 6. A second
+// write of the same tile has width 5 and other hashes beyond the head. It
+// renames a new file over that name. SetHead must keep the new file.
+func TestTU07SecondWriteOfATileOverAFileInDropKeepsTheNewFile(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5) // a crash leaves a file of width 5 beyond the head
+	s.Close()
+	s = openStore(t, state)
+	second, third := l.fork(t, 3, "second"), l.fork(t, 3, "third")
+	second.extend(t, 6)
+	third.extend(t, 5)
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 6}
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	mustNil(t, s.WriteTile(wide, second.tileData(wide)))
+	mustNil(t, s.WriteTile(narrow, third.tileData(narrow)))
+	mustNil(t, s.SetHead(5, third.root(t, 5)))
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
+		t.Fatalf("files after SetHead: %v, want only the new file of width 5", names)
+	}
+	s.Close()
+	s = openStore(t, state)
+	if size, root := s.TreeHead(); size != 5 || root != third.root(t, 5) {
+		t.Fatalf("after reopen: size %d, root %x", size, root)
+	}
+}
+
+// T-U-07: a SetHead that a check refuses keeps the recorded directories and
+// files. The next SetHead that works acts on them, and the result is the same
+// as with no refused call.
+func TestTU07RefusedSetHeadLeavesTheBatchForTheNextCall(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	var e *Error
+	if err := s.SetHead(5, tlog.Hash{1}); !errors.As(err, &e) || e.Rule != ruleRoot {
+		t.Fatalf("got %v, want the rule %q", err, ruleRoot)
+	}
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files after the refused call: %v", names)
+	}
+	mustNil(t, s.SetHead(5, l.root(t, 5)))
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
+		t.Fatalf("files after the next call: %v", names)
+	}
+	if len(s.drop)+len(s.dirty)+len(s.differ) != 0 {
+		t.Fatalf("the batch stays: %v %v %v", s.drop, s.dirty, s.differ)
+	}
+}
+
 // T-U-07: the store keeps only the directories of the last batch and their
 // parents. A later batch in other directories drops the earlier ones, so the
 // set does not grow with the log.

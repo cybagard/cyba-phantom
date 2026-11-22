@@ -175,6 +175,11 @@ type Store struct {
 	// partial file for each tile, so each tile has only a few.
 	drop []string
 
+	// differ holds some files of drop. Each one differs from the kept file of
+	// its tile in a hash of their common width. SetHead deletes them. Then it
+	// calls fsync on their directories, before the head file.
+	differ map[string]bool
+
 	// synced holds the directories that this Store synced since Open. Each one
 	// has all its parents up to the log directory synced too. No sync error
 	// came after it. The set holds only the directories of the last batch that
@@ -312,7 +317,7 @@ func (s *Store) load() error {
 			continue
 		}
 		seen[tileKey(t)] = true
-		names, err := s.stale(t, 0, s.committed(t))
+		names, _, err := s.stale(t, 0, s.committed(t))
 		if err != nil {
 			return err
 		}
@@ -369,7 +374,7 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 			if err := s.checkDirs(t); err != nil {
 				return nil, nil, err
 			}
-			names, err := s.stale(t, 0, 0)
+			names, _, err := s.stale(t, 0, 0)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -552,12 +557,14 @@ func readNames(read []tlog.Tile, empty string) string {
 // If an fsync fails, SetHead returns an error and writes no head file. The
 // error does not match ErrHeadOnDisk, and the Store forgets the directories
 // that it synced. Then SetHead deletes the stale files that WriteTile found.
-// It calls no fsync on their directories. Then it writes the head file: fsync
-// of the file, rename, and fsync of the log directory. The write can fail at
-// the rename of the head file or after it. Then the head file on disk can hold
-// the new size and root. The
-// Store keeps the old tree head in memory. The error matches ErrHeadOnDisk,
-// and Log stops on it. The caller must close the Store and open it again.
+// A deleted file can differ from the kept file, for example a wider one. Then
+// SetHead calls fsync on its directory. A failed fsync there has the same
+// result. It calls no fsync on the other directories. Then it writes the head
+// file: fsync of the file, rename, and fsync of the log directory. The write
+// can fail at the rename of the head file or after it. Then the head file on
+// disk can hold the new size and root. The Store keeps the old tree head in
+// memory. The error matches ErrHeadOnDisk, and Log stops on it. The caller must
+// close the Store and open it again.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -586,7 +593,7 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 			return err
 		}
 		c := covered(next.N, t)
-		if _, err := s.stale(t, 0, c); err != nil {
+		if _, _, err := s.stale(t, 0, c); err != nil {
 			return err
 		}
 		if c > s.committed(t) && s.written[tileKey(t)] < c {
@@ -607,8 +614,9 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 		return err
 	}
 	// The new files are durable, so the files that they replace are not the
-	// only copy. Delete them now. A file that a crash brings back is stale,
-	// and Open deletes it.
+	// only copy. Delete them now. A file that differs from the kept file is
+	// durably gone before the head file. Open deletes any other file that a
+	// crash brings back.
 	if err := s.unlinkDropped(); err != nil {
 		return err
 	}
@@ -659,13 +667,28 @@ func (s *Store) syncBatch() error {
 	return nil
 }
 
-// unlinkDropped deletes the files in drop. It calls no fsync on their
-// directories. A file that a crash brings back is stale, and Open deletes it.
+// unlinkDropped deletes the files in drop. A file in differ can disagree with
+// the new head, so it must not come back after a crash. After the deletes,
+// unlinkDropped calls fsync on the directory of each file in differ. If a call
+// fails, it clears synced and returns the error. It calls no fsync on the other
+// directories. A narrower file that a crash brings back has the same hashes as
+// the kept file, and Open deletes it.
 func (s *Store) unlinkDropped() error {
 	if _, err := s.unlink(s.drop); err != nil {
 		return err
 	}
-	s.drop = nil
+	var dirs []string
+	for name := range s.differ {
+		dirs = append(dirs, path.Dir(name))
+	}
+	slices.Sort(dirs)
+	for _, dir := range slices.Compact(dirs) {
+		if err := syncOneDir(s.dir, dir); err != nil {
+			s.synced = nil
+			return newError(dirName(err, dir), syncRule(err))
+		}
+	}
+	s.drop, s.differ = nil, nil
 	return nil
 }
 
@@ -784,12 +807,15 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		// Each other file of the tile must agree in the covered hashes. This
 		// includes the file that the rename replaces. Check before the write,
 		// so that a bad file gives an error and no file changes.
-		if _, err := s.staleFrom(t, 0, c, tileFiles{widths, tmps, w, old, true}); err != nil {
+		if _, _, err := s.staleFrom(t, 0, c, tileFiles{widths, tmps, w, old, true}); err != nil {
 			return err
 		}
 		if err := s.writeFile(t.Path(), data); err != nil {
 			return newError(t.Path(), ruleWrite)
 		}
+		// The new file can have the name of a file that an earlier call of this
+		// batch put in drop. It must stay.
+		s.keep(t.Path())
 		if t.W < w {
 			// The wider files differ beyond the tree head: they are stale.
 			keep = t.W
@@ -876,14 +902,27 @@ func (s *Store) widest(t tlog.Tile, widths []int) (tileFile, error) {
 }
 
 // queueStale adds the files that stale returns for tile t to drop. SetHead
-// deletes them after the fsync of the directories of the batch.
+// deletes them after the fsync of the directories of the batch. A file that
+// differs from the kept file also goes to differ.
 func (s *Store) queueStale(t tlog.Tile, keep int) error {
-	rm, err := s.stale(t, keep, s.committed(t))
+	rm, differ, err := s.stale(t, keep, s.committed(t))
 	if err != nil {
 		return err
 	}
 	s.drop = append(s.drop, rm...)
+	for _, name := range differ {
+		if s.differ == nil {
+			s.differ = map[string]bool{}
+		}
+		s.differ[name] = true
+	}
 	return nil
+}
+
+// keep removes name from drop and from differ.
+func (s *Store) keep(name string) {
+	s.drop = slices.DeleteFunc(s.drop, func(n string) bool { return n == name })
+	delete(s.differ, name)
 }
 
 // markDirty records that SetHead must call fsync on the directory dir.
@@ -902,15 +941,17 @@ func (s *Store) markDirty(dir string) {
 // the files differ only beyond the tree head. The kept file must hold all c
 // covered hashes. A file in the result must have the same covered hashes. If
 // not, stale returns an error, because the file can be the only copy of covered
-// hashes. stale refuses a link in the result. It deletes nothing.
-func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
+// hashes. stale refuses a link in the result. It deletes nothing. The second
+// result holds some files of the first. Each one differs from the kept file in
+// a hash of their common width.
+func (s *Store) stale(t tlog.Tile, keep, c int) (rm, differ []string, err error) {
 	widths, tmps, err := s.partials(t)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	top, err := s.widest(t, widths)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return s.staleFrom(t, keep, c, tileFiles{widths, tmps, top.w, top.data, false})
 }
@@ -931,23 +972,21 @@ type tileFiles struct {
 
 // staleFrom is stale for a tile that the caller has listed and read. It
 // refuses a link in the result, because remove deletes the files with no read.
-func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) ([]string, error) {
+func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) (rm, differ []string, err error) {
 	widths, tmps, w, top := l.widths, l.tmps, l.w, l.top
-	var err error
 	if w == fullWidth {
 		widths = append(widths, w)
 	}
 	if keep > 0 && keep != w {
 		if top, err = s.readFile(tilePath(t, keep), keep*tlog.HashSize); err != nil {
-			return nil, newError(dirName(err, tilePath(t, keep)), fileRule(err))
+			return nil, nil, newError(dirName(err, tilePath(t, keep)), fileRule(err))
 		}
 		w = keep
 	}
 	if w < c {
-		return nil, newError(tilePath(t, c), ruleMissing)
+		return nil, nil, newError(tilePath(t, c), ruleMissing)
 	}
 	dir := path.Dir(tilePath(t, 1))
-	var rm []string
 	for _, name := range tmps {
 		rm = append(rm, path.Join(dir, name))
 	}
@@ -960,13 +999,18 @@ func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) ([]string, erro
 		file := tilePath(t, p)
 		b, err := s.readFile(file, p*tlog.HashSize)
 		if err != nil {
-			return nil, newError(dirName(err, file), fileRule(err))
+			return nil, nil, newError(dirName(err, file), fileRule(err))
 		}
 		n := min(p, c) * tlog.HashSize
 		if !bytes.Equal(b[:n], top[:n]) {
-			return nil, newError(file, ruleRewrite)
+			return nil, nil, newError(file, ruleRewrite)
 		}
 		rm = append(rm, file)
+		// A file can differ from the kept file in a hash of the common width.
+		// Then it can disagree with the new head, and its delete needs fsync.
+		if m := min(p, w) * tlog.HashSize; !bytes.Equal(b[:m], top[:m]) {
+			differ = append(differ, file)
+		}
 	}
 	// remove deletes these files with no read. A link is not a stale file.
 	for _, name := range rm {
@@ -974,10 +1018,10 @@ func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) ([]string, erro
 			continue
 		}
 		if fi, err := s.dir.Lstat(name); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-			return nil, newError(name, ruleFileLink)
+			return nil, nil, newError(name, ruleFileLink)
 		}
 	}
-	return rm, nil
+	return rm, differ, nil
 }
 
 // remove deletes the files in names, in order, and then calls fsync on their

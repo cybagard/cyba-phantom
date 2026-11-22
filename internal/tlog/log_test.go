@@ -1419,6 +1419,94 @@ func TestTU07ReplacedFileIsDeletedAfterTheDirectorySync(t *testing.T) {
 	}
 }
 
+// T-U-07: a failed batch leaves a wider partial file. It differs from the new
+// narrow file in hashes that the new head covers. The store deletes the wider
+// file. Then it calls fsync on the directory. Both come before the head rename.
+// A crash could keep the head and bring the wider file back. Then Open would
+// refuse the log. The test also counts the fsync calls of this Append.
+func TestTU07WiderStaleFileIsDeletedAndSyncedBeforeTheHead(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 256)
+	wide := failDirSyncAfterRename(t, "tile/8/0/001.p/3")
+	if _, err := l.AppendBatch(batchOf(1000, 1003)); err == nil {
+		t.Fatal("AppendBatch returned nil after the failed fsync of the wide tile")
+	}
+	wide()
+	l.Close()
+	l = openTestLog(t, state)
+
+	stale := filepath.Join(dir, "tlog", "tile/8/0/001.p/3")
+	var steps []string
+	files, dirs := 0, 0
+	setHooks(t, hooks{
+		file: func(f *os.File) error { files++; return realSync(f) },
+		dir: func(f *os.File) error {
+			dirs++
+			if strings.HasSuffix(filepath.Clean(f.Name()), "tile/8/0/001.p") {
+				state := "gone"
+				if _, err := os.Lstat(stale); err == nil {
+					state = "present"
+				}
+				steps = append(steps, "sync 001.p, wider file "+state)
+			}
+			return realSync(f)
+		},
+		rename: func(r *os.Root, from, to string) error {
+			if to == headName {
+				steps = append(steps, "head")
+			}
+			return realRename(r, from, to)
+		},
+	})
+	if idx, err := l.Append(testEvent(256)); err != nil || idx != 256 {
+		t.Fatalf("Append gave %d, %v", idx, err)
+	}
+	want := []string{"sync 001.p, wider file present", "sync 001.p, wider file gone", "head"}
+	if !slices.Equal(steps, want) {
+		t.Fatalf("steps %q, want %q", steps, want)
+	}
+	// The first Append after Open syncs the 5 directories of the chain. Then
+	// it syncs the directory of the wider file, and the log directory.
+	if files != 2 || dirs != 7 {
+		t.Fatalf("got %d file and %d directory fsync calls, want 2 and 7", files, dirs)
+	}
+}
+
+// T-U-07: the fsync after the delete of a wider stale file fails. Then Append
+// returns an error that does not match ErrHeadOnDisk. The head file stays. The
+// store forgets its synced directories.
+func TestTU07FailedSyncAfterDeleteOfWiderFileWritesNoHead(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 256)
+	wide := failDirSyncAfterRename(t, "tile/8/0/001.p/3")
+	if _, err := l.AppendBatch(batchOf(1000, 1003)); err == nil {
+		t.Fatal("AppendBatch returned nil after the failed fsync of the wide tile")
+	}
+	wide()
+	l.Close()
+	l = openTestLog(t, state)
+
+	stale := filepath.Join(dir, "tlog", "tile/8/0/001.p/3")
+	setHooks(t, hooks{dir: func(f *os.File) error {
+		if _, err := os.Lstat(stale); err != nil {
+			return errors.New("injected")
+		}
+		return realSync(f)
+	}})
+	_, err := l.Append(testEvent(256))
+	if err == nil || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("got %v, want an error that is not marked", err)
+	}
+	if size, _ := diskHead(t, dir); size != 256 {
+		t.Fatalf("head on disk has size %d, want 256", size)
+	}
+	if len(l.store.synced) != 0 {
+		t.Fatalf("the store keeps %d synced directories", len(l.store.synced))
+	}
+}
+
 // countSyncs counts the fsync calls of files and of directories, with the real
 // calls on. The test restores the earlier calls when it ends.
 func countSyncs(t testing.TB) (files, dirs *int) {
