@@ -16,6 +16,8 @@ import (
 	xtlog "golang.org/x/mod/sumdb/tlog"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
 
@@ -412,6 +414,22 @@ func TestTI07MarkerIsTriedAgainAfterAStopDuringRun(t *testing.T) {
 	}
 }
 
+// privateRoot opens a new state directory with the mode 0o700. t.TempDir can
+// have group or other bits, and the directory rule of SyncDir refuses them.
+func privateRoot(t *testing.T) *os.Root {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return root
+}
+
 // T-I-07: makeMarker gives an error in a state directory that is gone.
 // OpenFile gives the error: Open of "." and Sync work on that directory.
 func TestTI07MarkerFailsInARemovedDirectory(t *testing.T) {
@@ -437,18 +455,16 @@ func TestTI07MarkerFailsInARemovedDirectory(t *testing.T) {
 func TestTI07MarkerCloseFails(t *testing.T) {
 	errClose := errors.New("close failed")
 	ran := 0
-	setHook(t, &closeFile, func(f *os.File) error {
-		ran++
-		if err := f.Close(); err != nil {
-			t.Error(err)
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
+		if step != "close" {
+			return nil
+		}
+		if ran++; name != markerName {
+			t.Errorf("the hook got the name %q, want %q", name, markerName)
 		}
 		return errClose
-	})
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
+	}})
+	root := privateRoot(t)
 	var out bytes.Buffer
 	w := &Writer{rec: Recovery{State: root}, log: slog.New(slog.NewTextHandler(&out, nil))}
 	w.ensureMarker()
@@ -467,25 +483,23 @@ func TestTI07MarkerCloseFails(t *testing.T) {
 	}
 }
 
-// T-I-07: a failed open of the state directory, after the marker file is made,
-// is an error.
-func TestTI07MarkerDirectoryOpenFails(t *testing.T) {
-	errOpen := errors.New("open failed")
+// T-I-07: a failed sync of the state directory, after the marker file is made,
+// is an error. A hook error fails its step.
+func TestTI07MarkerDirectorySyncFailsAfterMarkerFile(t *testing.T) {
+	errSync := errors.New("sync failed")
 	ran := 0
-	setHook(t, &openStateDir, func(_ *os.Root, name string) (*os.File, error) {
-		ran++
-		if name != "." {
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
+		if step != "dirsync" {
+			return nil
+		}
+		if ran++; name != "." {
 			t.Errorf("the hook got the name %q, want %q", name, ".")
 		}
-		return nil, errOpen
-	})
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-	if err := makeMarker(root); !errors.Is(err, errOpen) || ran != 1 {
-		t.Fatalf("makeMarker gave %v after %d opens, want the open error", err, ran)
+		return errSync
+	}})
+	root := privateRoot(t)
+	if err := makeMarker(root); !errors.Is(err, errSync) || !errors.Is(err, safefile.ErrDirSync) || ran != 1 {
+		t.Fatalf("makeMarker gave %v after %d directory syncs, want the sync error", err, ran)
 	}
 	if _, err := root.Lstat(markerName); err != nil {
 		t.Fatalf("the marker file is not there: %v", err)
@@ -493,8 +507,8 @@ func TestTI07MarkerDirectoryOpenFails(t *testing.T) {
 }
 
 // T-I-07: a failed fsync of the new marker file, or of the state directory, is
-// an error. makeMarker closes the marker file in both cases. It closes the
-// directory when it opens it.
+// an error. makeMarker closes the marker file in both cases. SyncDir closes the
+// directory, and its own tests check that.
 func TestTI07MarkerSyncFails(t *testing.T) {
 	for _, failDir := range []bool{false, true} {
 		name := "file"
@@ -503,47 +517,152 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			errSync := errors.New("sync failed")
-			var files, dirs, fileCloses, dirCloses int
-			setHook(t, &syncFile, func(f *os.File) error {
-				fi, err := f.Stat()
-				if err != nil {
-					t.Error(err)
-					return err
-				}
-				if !fi.IsDir() {
+			var files, dirs, fileCloses int
+			safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+				switch step {
+				case "sync":
 					files++
-				} else {
+				case "dirsync":
 					dirs++
-				}
-				if fi.IsDir() == failDir {
-					return errSync
-				}
-				return f.Sync()
-			})
-			setHook(t, &closeFile, func(f *os.File) error {
-				if fi, err := f.Stat(); err != nil {
-					t.Error(err)
-				} else if fi.IsDir() {
-					dirCloses++
-				} else {
+				case "close":
 					fileCloses++
 				}
-				return f.Close()
-			})
-			root, err := os.OpenRoot(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer root.Close()
+				if failDir == (step == "dirsync") && step != "close" {
+					return errSync
+				}
+				return nil
+			}})
+			root := privateRoot(t)
 			wantDirs := 0
 			if failDir {
 				wantDirs = 1
 			}
 			if err := makeMarker(root); !errors.Is(err, errSync) ||
-				files != 1 || dirs != wantDirs ||
-				fileCloses != 1 || dirCloses != wantDirs {
-				t.Fatalf("makeMarker gave %v, syncs %d+%d, closes %d+%d (file+directory)",
-					err, files, dirs, fileCloses, dirCloses)
+				files != 1 || dirs != wantDirs || fileCloses != 1 {
+				t.Fatalf("makeMarker gave %v, syncs %d+%d, file closes %d (file+directory)",
+					err, files, dirs, fileCloses)
+			}
+		})
+	}
+}
+
+// stopSignal is the panic value of a stop hook.
+type stopSignal struct{}
+
+// stopAt sets a Step hook that panics with stopSignal once, before the step.
+// It returns a function that gives true when the hook ran. The store callers
+// do not stop at seam.Crash. newDatabase calls drop on each error of a sync.
+// makeMarker closes the file after a failed sync. So the tests use a panic.
+// The panic stops the call with no file cleanup. Deferred calls still run. One
+// example is the deferred close of the directory in Open.
+func stopAt(t *testing.T, step string) (ran func() bool) {
+	t.Helper()
+	armed := true
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(s, _ string) error {
+		if s == step && armed {
+			armed = false
+			panic(stopSignal{})
+		}
+		return nil
+	}})
+	return func() bool { return !armed }
+}
+
+// catchPanic runs f. It fails t when f does not panic with stopSignal.
+func catchPanic(t *testing.T, f func()) {
+	t.Helper()
+	defer func() {
+		switch r := recover(); r {
+		case nil:
+			t.Error("the call did not stop at the stop hook")
+		case stopSignal{}:
+		default:
+			t.Errorf("the call panicked with another value: %v", r)
+		}
+	}()
+	f()
+}
+
+// T-I-07: a marker that exists is a success, followed by the directory sync.
+// No file sync and no close runs. If the directory sync fails, makeMarker
+// returns that error.
+func TestTI07MarkerThatExistsIsFollowedByTheDirectorySync(t *testing.T) {
+	errSync := errors.New("sync failed")
+	for _, c := range []struct {
+		name string
+		hook error // the error of the directory sync
+	}{{"directory sync passes", nil}, {"directory sync fails", errSync}} {
+		t.Run(c.name, func(t *testing.T) {
+			root := privateRoot(t)
+			if err := os.WriteFile(filepath.Join(root.Name(), markerName), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var dirs int
+			var others []string
+			safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+				if step != "dirsync" {
+					others = append(others, step)
+					return nil
+				}
+				dirs++
+				return c.hook
+			}})
+			err := makeMarker(root)
+			if dirs != 1 || len(others) != 0 {
+				t.Fatalf("directory syncs %d, other steps %q; want 1 and none", dirs, others)
+			}
+			if c.hook == nil && err != nil {
+				t.Fatalf("makeMarker gave %v, want nil", err)
+			}
+			if c.hook != nil && (!errors.Is(err, errSync) || !errors.Is(err, safefile.ErrDirSync)) {
+				t.Fatalf("makeMarker gave %v, want the directory sync error", err)
+			}
+		})
+	}
+}
+
+// T-I-07: the file sync and the close of a new marker both fail, with two
+// different errors. makeMarker keeps the first error, the one of the sync.
+func TestTI07MarkerKeepsTheSyncErrorWhenTheCloseFailsToo(t *testing.T) {
+	errSync, errClose := errors.New("sync failed"), errors.New("close failed")
+	var closes int
+	safefiletest.Set(t, safefiletest.Hooks{Step: func(step, _ string) error {
+		switch step {
+		case "sync":
+			return errSync
+		case "close":
+			closes++
+			return errClose
+		}
+		return nil
+	}})
+	root := privateRoot(t)
+	err := makeMarker(root)
+	if !errors.Is(err, errSync) || errors.Is(err, errClose) || closes != 1 {
+		t.Fatalf("makeMarker gave %v after %d closes, want the sync error only", err, closes)
+	}
+}
+
+// T-S-38: makeMarker stops at the file sync, the close or the directory sync.
+// The marker file is there. The next makeMarker succeeds. At "sync" the panic
+// leaves the marker descriptor open. At "close" CloseFile closes it.
+func TestTS38StopAtMarkerStepsLeavesAMarker(t *testing.T) {
+	for _, step := range []string{"sync", "close", "dirsync"} {
+		t.Run(step, func(t *testing.T) {
+			ran := stopAt(t, step)
+			root := privateRoot(t)
+			catchPanic(t, func() { makeMarker(root) })
+			if !ran() {
+				t.Fatal("the stop hook did not run")
+			}
+			if fi, err := root.Lstat(markerName); err != nil || fi.Size() != 0 {
+				t.Fatalf("the marker is not there after the stop: %v, %v", fi, err)
+			}
+			if err := makeMarker(root); err != nil {
+				t.Fatalf("the next makeMarker gave %v", err)
+			}
+			if fi, err := root.Lstat(markerName); err != nil || fi.Size() != 0 {
+				t.Fatalf("the marker is not there: %v, %v", fi, err)
 			}
 		})
 	}

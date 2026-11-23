@@ -352,12 +352,11 @@ func chmod640(t *testing.T, file string) func() {
 // failSync makes the sync of a directory, or of a file, fail.
 func failSync(t *testing.T, dir bool) {
 	t.Helper()
-	setHook(t, &syncFile, func(f *os.File) error {
-		if fi, err := f.Stat(); err == nil && fi.IsDir() == dir {
-			return errors.New("sync failed")
-		}
-		return f.Sync()
-	})
+	step := "sync"
+	if dir {
+		step = "dirsync"
+	}
+	failStep(t, step, errors.New("sync failed"))
 }
 
 // T-S-15: a failure after Open makes the file removes the file, at the

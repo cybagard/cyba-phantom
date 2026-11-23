@@ -38,7 +38,7 @@ func TestTS15CreateHelper(t *testing.T) {
 	if os.Getenv(crashPointEnv) == killCreate {
 		afterChecks = stop
 	} else {
-		beforeRename = stop
+		onStep(t, "sync", stop)
 	}
 	Open(root, "events.db", Options{})
 	t.Fatal("the helper process did not stop")
@@ -76,15 +76,35 @@ func gone(path string) bool {
 	return errors.Is(err, fs.ErrNotExist)
 }
 
-// onDirSync sets the sync hook so that f runs at the sync of the directory.
-func onDirSync(t *testing.T, f func()) {
-	t.Helper()
-	setHook(t, &syncFile, func(file *os.File) error {
-		if fi, err := file.Stat(); err == nil && fi.IsDir() {
-			f()
+// forStep gives a Step hook that calls f before each run of the step. The hook
+// gives the result of f. For other steps it gives nil.
+func forStep(step string, f func() error) func(string, string) error {
+	return func(s, _ string) error {
+		if s == step {
+			return f()
 		}
-		return file.Sync()
-	})
+		return nil
+	}
+}
+
+// stepHook gives a Step hook that runs f before the step. The step "sync" is
+// the file sync of the new database. The step "dirsync" is the sync of its
+// directory. The hook runs before the sync, not after it. At "sync" it is the
+// last seam call before the check of the real name and the rename.
+func stepHook(step string, f func()) func(string, string) error {
+	return forStep(step, func() error { f(); return nil })
+}
+
+// onStep sets the Step hook so that f runs before the step.
+func onStep(t *testing.T, step string, f func()) {
+	t.Helper()
+	safefiletest.Set(t, safefiletest.Hooks{Step: stepHook(step, f)})
+}
+
+// failStep sets the Step hook so that the step gives err.
+func failStep(t *testing.T, step string, err error) {
+	t.Helper()
+	safefiletest.Set(t, safefiletest.Hooks{Step: forStep(step, func() error { return err })})
 }
 
 // T-S-15: a start that stops after the create, or after the first write, leaves
@@ -128,22 +148,18 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 			root, state, _ := newState(t)
 			must(t, os.Mkdir(filepath.Join(state, "data"), 0o700))
 			file := filepath.Join(state, filepath.FromSlash(rel))
-			parent, _ := os.Stat(filepath.Dir(file))
 			var steps []string
-			setHook(t, &syncFile, func(f *os.File) error {
-				kind := "file"
-				if fi, err := f.Stat(); err == nil && fi.IsDir() {
-					kind = "other directory"
-					if os.SameFile(fi, parent) {
-						kind = "directory"
-					}
-				}
-				steps = append(steps, fmt.Sprintf("%s: temporary %t, real %t", kind, !gone(file+tempSuffix), !gone(file)))
-				return f.Sync()
-			})
+			safefiletest.Set(t, safefiletest.Hooks{Step: func(step, name string) error {
+				steps = append(steps, fmt.Sprintf("%s of %s: temporary %t, real %t", step, name, !gone(file+tempSuffix), !gone(file)))
+				return nil
+			}})
 			db := mustOpen(t, root, rel)
 			defer db.Close()
-			want := []string{"file: temporary true, real false", "directory: temporary false, real true"}
+			// The hook runs before each step. The directory has the name ".".
+			want := []string{
+				"sync of " + filepath.Base(file) + tempSuffix + ": temporary true, real false",
+				"dirsync of .: temporary false, real true",
+			}
 			var vacuum int
 			err := db.QueryRow("PRAGMA auto_vacuum").Scan(&vacuum)
 			if !reflect.DeepEqual(steps, want) || err != nil || vacuum != 2 {
@@ -156,6 +172,66 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 			for _, s := range suffixes {
 				if !gone(file + tempSuffix + s) {
 					t.Errorf("%s%s%s stays", rel, tempSuffix, s)
+				}
+			}
+		})
+	}
+}
+
+// T-S-15: for a nested store.path, Open syncs the directory that holds the
+// database, not the state directory. The Step hook gets the name "." for both.
+// So the hook at "sync" removes the read mode of the state directory. SyncDir
+// opens its directory before the "dirsync" hook runs. An open of the state
+// directory itself then fails with EACCES. The path "data" still opens.
+func TestTS15NewDatabaseSyncsTheDirectoryOfANestedPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the mode of the state directory")
+	}
+	root, state, _ := newState(t)
+	must(t, os.Mkdir(filepath.Join(state, "data"), 0o700))
+	restore := func() { hook(t, os.Chmod(state, 0o700)) }
+	t.Cleanup(restore)
+	onStep(t, "sync", func() { hook(t, os.Chmod(state, 0o300)) })
+	db, err := Open(root, "data/events.db", Options{})
+	restore()
+	if db != nil {
+		db.Close()
+	}
+	if err != nil {
+		t.Fatalf("Open gave %v, want the sync of the directory data", err)
+	}
+}
+
+// T-S-38: Open stops at the file sync or the directory sync of a new database.
+// The test panic skips the cleanup of newDatabase. At "sync" the temporary
+// file is there and the real name is absent. At "dirsync" the real name is
+// there. The next Open succeeds and no temporary file stays. At "sync" the
+// panic leaves the descriptor of the temporary file open. Nothing closes it.
+func TestTS38StopAtDatabaseWritesLeavesNoTemporaryFile(t *testing.T) {
+	for _, c := range []struct {
+		step    string
+		renamed bool // the stop is after the rename
+	}{{"sync", false}, {"dirsync", true}} {
+		t.Run(c.step, func(t *testing.T) {
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			ran := stopAt(t, c.step)
+			catchPanic(t, func() { Open(root, "events.db", Options{}) })
+			if !ran() {
+				t.Fatal("the stop hook did not run")
+			}
+			if gone(file) == c.renamed || gone(file+tempSuffix) != c.renamed {
+				t.Fatalf("after the stop: real name gone %v, temporary gone %v; want %v, %v",
+					gone(file), gone(file+tempSuffix), !c.renamed, c.renamed)
+			}
+			db := mustOpen(t, root, "events.db")
+			defer db.Close()
+			if err := Migrate(db, "origin"); err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range suffixes {
+				if !gone(file + tempSuffix + s) {
+					t.Errorf("events.db%s%s stays", tempSuffix, s)
 				}
 			}
 		})
@@ -316,11 +392,12 @@ func (r refusedStart) run(t *testing.T) {
 		}
 	}
 	call := func() { r.then(t, at) }
+	var hooks safefiletest.Hooks
 	switch r.on {
-	case "rename":
-		setHook(t, &beforeRename, call)
-	case "sync":
-		onDirSync(t, call)
+	case "rename": // at the file sync, just before the check of the real name
+		hooks.Step = stepHook("sync", call)
+	case "sync": // at the sync of the directory
+		hooks.Step = stepHook("dirsync", call)
 	case "checks":
 		setHook(t, &afterChecks, nth(1, call))
 	case "checks2": // after the guard close, at the real name
@@ -341,11 +418,14 @@ func (r refusedStart) run(t *testing.T) {
 		// The hook sees a directory name in openDir of Open, open and each pool
 		// check. It sees the temporary name at the second open and the reopen.
 		second := nth(2, call)
-		safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+		hooks.BeforeCheck = func(name string) {
 			if name == r.onName {
 				second()
 			}
-		}})
+		}
+	}
+	if hooks.Step != nil || hooks.BeforeCheck != nil {
+		safefiletest.Set(t, hooks)
 	}
 	if r.rel == "" {
 		r.rel = "events.db"
