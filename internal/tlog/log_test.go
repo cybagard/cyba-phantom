@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -522,8 +523,9 @@ func TestTU07NarrowWriteSyncsTheDirectoryOfTheKeptWiderFile(t *testing.T) {
 	l.Close()
 
 	// The tile is 001.p/1 and the kept file is 001.p/3. If each fsync of a
-	// directory fails, the error names the kept file and the head stays.
-	const kept = "tile/8/0/001.p/3"
+	// directory fails, the error names the directory of the kept file, and the
+	// head stays.
+	const kept = "tile/8/0/001.p"
 	l = openTestLog(t, state)
 	restore := setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
 	_, err := l.Append(testEvent(256))
@@ -571,8 +573,8 @@ func TestTU07NarrowWriteOverAStaleWiderFileFailsTheDirectorySync(t *testing.T) {
 	_, err := l.Append(testEvent(256))
 	stop()
 	var e *Error
-	if !errors.As(err, &e) || e.Rule != ruleWrite || e.Name != narrow {
-		t.Fatalf("Append gave %v, want the rule %q for %s", err, ruleWrite, narrow)
+	if want := path.Dir(narrow); !errors.As(err, &e) || e.Rule != ruleWrite || e.Name != want {
+		t.Fatalf("Append gave %v, want the rule %q for %s", err, ruleWrite, want)
 	}
 	checkHead(t, "head in memory", l.Head, size, root)
 	checkHead(t, "head on disk", onDisk(t, dir), size, root)
@@ -691,16 +693,23 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			ref := openTestLog(t, refState)
 			appendTo(t, ref, 0, start+500)
 
-			heads, tileWrites, dirSyncs := 0, 0, 0
-			restore := setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
+			heads, tileWrites, dirSyncs, fileSyncs := 0, 0, 0, 0
+			beforeHead := map[string]int{} // the fsync calls of each directory
+			restore := setHooks(t, hooks{file: func(*os.File) error {
+				fileSyncs++
+				return nil
+			}, rename: func(r *os.Root, from, to string) error {
 				if to == headName {
 					heads++
 				} else {
 					tileWrites++
 				}
 				return realRename(r, from, to)
-			}, dir: func(*os.File) error {
+			}, dir: func(f *os.File) error {
 				dirSyncs++
+				if heads == 0 {
+					beforeHead[f.Name()]++
+				}
 				return nil
 			}})
 			first, err := l.AppendBatch(batchOf(start, start+500))
@@ -714,9 +723,22 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			if want := map[int]int{0: 3, 100: 4}[start]; tileWrites != want {
 				t.Fatalf("AppendBatch wrote %d tiles, want %d", tileWrites, want)
 			}
-			// A second write of a tile skips the rename but syncs the
-			// directories. So the count of syncs shows a repeated write.
-			if want := map[int]int{0: 15, 100: 24}[start]; dirSyncs != want {
+			// Each tile write has one fsync of its file, and the head has one.
+			if fileSyncs != tileWrites+heads {
+				t.Fatalf("AppendBatch synced files %d times, want %d", fileSyncs, tileWrites+heads)
+			}
+			// The batch syncs each directory one time before the head file. The
+			// head file has one more sync of the log directory. From 0, the
+			// directories are 3 tile directories and 4 parents. From 100, the
+			// earlier Appends synced two parents, so the batch syncs 5. It also
+			// syncs the partial directory after the delete of the partial file
+			// of tile 0, which the batch fills.
+			for dir, n := range beforeHead {
+				if n != 1 {
+					t.Errorf("AppendBatch synced %s %d times before the head, want 1", dir, n)
+				}
+			}
+			if want := map[int]int{0: 8, 100: 7}[start]; dirSyncs != want {
 				t.Fatalf("AppendBatch synced directories %d times, want %d", dirSyncs, want)
 			}
 			size, root := ref.Head()
@@ -1371,5 +1393,180 @@ func TestTU07BatchCopiesALevelBufferOneTime(t *testing.T) {
 	const limit = 500 << 10
 	if got > limit {
 		t.Errorf("AppendBatch allocated %d bytes, want at most %d", got, limit)
+	}
+}
+
+// T-U-07: a wider file replaces a partial file. The store deletes the old file
+// only after the fsync of the directory of the new file. Until then, the old
+// file holds hashes that the stored head covers.
+func TestTU07ReplacedFileIsDeletedAfterTheDirectorySync(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 3)
+	partial := func(w int) string {
+		return filepath.Join(dir, "tlog", "tile/8/0/000.p", fmt.Sprint(w))
+	}
+	exists := func(p string) bool { _, err := os.Lstat(p); return err == nil }
+	syncs, headRenamed := 0, false
+	setHooks(t, hooks{
+		dir: func(f *os.File) error {
+			syncs++
+			if !headRenamed && (!exists(partial(3)) || !exists(partial(4))) {
+				t.Errorf("fsync %d of a directory: the new file is missing or the old file is gone", syncs)
+			}
+			return realSync(f)
+		},
+		rename: func(r *os.Root, from, to string) error {
+			headRenamed = headRenamed || to == headName
+			return realRename(r, from, to)
+		},
+	})
+	appendTo(t, l, 3, 4)
+	if syncs == 0 || exists(partial(3)) || !exists(partial(4)) {
+		t.Fatalf("after Append: %d directory syncs, old file there %v, new file there %v",
+			syncs, exists(partial(3)), exists(partial(4)))
+	}
+}
+
+// T-U-07: a failed batch leaves a wider partial file. It differs from the new
+// narrow file in hashes that the new head covers. The store deletes the wider
+// file. Then it calls fsync on the directory. Both come before the head rename.
+// A crash could keep the head and bring the wider file back. Then Open would
+// refuse the log. The test also counts the fsync calls of this Append.
+func TestTU07WiderStaleFileIsDeletedAndSyncedBeforeTheHead(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 256)
+	wide := failDirSyncAfterRename(t, "tile/8/0/001.p/3")
+	if _, err := l.AppendBatch(batchOf(1000, 1003)); err == nil {
+		t.Fatal("AppendBatch returned nil after the failed fsync of the wide tile")
+	}
+	wide()
+	l.Close()
+	l = openTestLog(t, state)
+
+	stale := filepath.Join(dir, "tlog", "tile/8/0/001.p/3")
+	var steps []string
+	files, dirs := 0, 0
+	setHooks(t, hooks{
+		file: func(f *os.File) error { files++; return realSync(f) },
+		dir: func(f *os.File) error {
+			dirs++
+			if strings.HasSuffix(filepath.Clean(f.Name()), "tile/8/0/001.p") {
+				state := "gone"
+				if _, err := os.Lstat(stale); err == nil {
+					state = "present"
+				}
+				steps = append(steps, "sync 001.p, wider file "+state)
+			}
+			return realSync(f)
+		},
+		rename: func(r *os.Root, from, to string) error {
+			if to == headName {
+				steps = append(steps, "head")
+			}
+			return realRename(r, from, to)
+		},
+	})
+	if idx, err := l.Append(testEvent(256)); err != nil || idx != 256 {
+		t.Fatalf("Append gave %d, %v", idx, err)
+	}
+	want := []string{"sync 001.p, wider file present", "sync 001.p, wider file gone", "head"}
+	if !slices.Equal(steps, want) {
+		t.Fatalf("steps %q, want %q", steps, want)
+	}
+	// The first Append after Open syncs the 5 directories of the chain. Then
+	// it syncs the directory of the wider file, and the log directory.
+	if files != 2 || dirs != 7 {
+		t.Fatalf("got %d file and %d directory fsync calls, want 2 and 7", files, dirs)
+	}
+}
+
+// T-U-07: the fsync after the delete of a wider stale file fails. Then Append
+// returns an error that does not match ErrHeadOnDisk. The head file stays. The
+// store forgets its synced directories.
+func TestTU07FailedSyncAfterDeleteOfWiderFileWritesNoHead(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 256)
+	wide := failDirSyncAfterRename(t, "tile/8/0/001.p/3")
+	if _, err := l.AppendBatch(batchOf(1000, 1003)); err == nil {
+		t.Fatal("AppendBatch returned nil after the failed fsync of the wide tile")
+	}
+	wide()
+	l.Close()
+	l = openTestLog(t, state)
+
+	stale := filepath.Join(dir, "tlog", "tile/8/0/001.p/3")
+	setHooks(t, hooks{dir: func(f *os.File) error {
+		if _, err := os.Lstat(stale); err != nil {
+			return errors.New("injected")
+		}
+		return realSync(f)
+	}})
+	_, err := l.Append(testEvent(256))
+	if err == nil || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("got %v, want an error that is not marked", err)
+	}
+	if size, _ := diskHead(t, dir); size != 256 {
+		t.Fatalf("head on disk has size %d, want 256", size)
+	}
+	if len(l.store.synced) != 0 {
+		t.Fatalf("the store keeps %d synced directories", len(l.store.synced))
+	}
+}
+
+// countSyncs counts the fsync calls of files and of directories, with the real
+// calls on. The test restores the earlier calls when it ends.
+func countSyncs(t testing.TB) (files, dirs *int) {
+	t.Helper()
+	files, dirs = new(int), new(int)
+	setHooks(t, hooks{
+		file: func(f *os.File) error { *files++; return realSync(f) },
+		dir:  func(f *os.File) error { *dirs++; return realSync(f) },
+	})
+	return files, dirs
+}
+
+// T-U-07: the fsync calls of one Append. The store syncs the directory of the
+// tile file one time. A directory that it did not sync before also gets its
+// parents. This goes up to the first directory that it synced before. The first
+// Append after Open syncs each parent up to the log directory.
+func TestTU07AppendFsyncCount(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		warm          int // the leaves before the counted Append
+		files, dirs   int
+		warmAfterOpen bool
+	}{
+		// The tile file and the head file are two files. The directory chain
+		// has five directories, up to the log directory. The head file syncs
+		// the log directory again.
+		{"first Append after Open", 10, 2, 6, false},
+		// The tile directory, and the log directory for the head file.
+		{"tile directories exist", 10, 2, 2, true},
+		// The new tile directory and its parent, and the log directory.
+		{"new tile directory", 256, 2, 3, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, _ := newLogState(t)
+			l := openTestLog(t, state)
+			withoutSync(t)
+			_, err := l.AppendBatch(batchOf(0, c.warm))
+			mustNil(t, err)
+			if !c.warmAfterOpen {
+				l.Close()
+				l = openTestLog(t, state)
+			}
+			files, dirs := countSyncs(t)
+			if idx, err := l.Append(testEvent(c.warm)); err != nil || idx != int64(c.warm) {
+				t.Fatalf("Append gave %d, %v, want %d", idx, err, c.warm)
+			}
+			t.Logf("file fsync %d, directory fsync %d", *files, *dirs)
+			if *files != c.files || *dirs != c.dirs {
+				t.Errorf("got %d file and %d directory fsync calls, want %d and %d",
+					*files, *dirs, c.files, c.dirs)
+			}
+		})
 	}
 }

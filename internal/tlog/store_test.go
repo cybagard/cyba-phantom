@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -337,8 +338,10 @@ func TestTU07DurabilityHooksAreTheFunctionsOfTheOsPackage(t *testing.T) {
 }
 
 // A tile or the tree head is durable in this order. First, the store writes the
-// temporary file and calls fsync on it. Then it renames the file. Last, it
-// calls fsync on the directory and on each parent.
+// temporary file and calls fsync on it. Then it renames the file. For a tile,
+// WriteTile stops here. SetHead then calls fsync on the directory and on each
+// parent. This comes before the head file. For the head file, the last step is
+// fsync on the log directory.
 func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
@@ -350,8 +353,7 @@ func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 		tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
 		steps := recordDurableSteps(t, log, tile.Path(), l.tileData(tile))
 		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
-		want := []string{"write temp", "sync file", "rename", "sync dir tile/8/0/000.p",
-			"sync dir tile/8/0", "sync dir tile/8", "sync dir tile", "sync dir ."}
+		want := []string{"write temp", "sync file", "rename"}
 		if !slices.Equal(*steps, want) {
 			t.Fatalf("got %q, want %q", *steps, want)
 		}
@@ -366,22 +368,44 @@ func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 		steps := recordDurableSteps(t, filepath.Join(dir, "tlog"), tile.Path(), l.tileData(tile))
 		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
 		// The full tile and its temporary file are in the level directory.
-		want := []string{"write temp", "sync file", "rename", "sync dir tile/8/0",
-			"sync dir tile/8", "sync dir tile", "sync dir ."}
+		want := []string{"write temp", "sync file", "rename"}
 		if !slices.Equal(*steps, want) {
 			t.Fatalf("got %q, want %q", *steps, want)
 		}
 	})
-	t.Run("tree head", func(t *testing.T) {
-		var head [headSize]byte
-		binary.BigEndian.PutUint64(head[:], 3)
-		root := l.root(t, 3)
-		copy(head[sizeLen:], root[:])
-		steps := recordDurableSteps(t, log, headName, head[:])
-		mustNil(t, s.SetHead(3, root))
-		want := []string{"write temp", "sync file", "rename", "sync dir ."}
-		if !slices.Equal(*steps, want) {
-			t.Fatalf("got %q, want %q", *steps, want)
+	t.Run("directories and tree head", func(t *testing.T) {
+		var steps []string
+		known := []string{".", "tile", "tile/8", "tile/8/0", "tile/8/0/000.p"}
+		setHooks(t, hooks{
+			file: func(f *os.File) error {
+				steps = append(steps, "sync file")
+				return realSync(f)
+			},
+			rename: func(r *os.Root, from, to string) error {
+				steps = append(steps, "rename "+to)
+				return realRename(r, from, to)
+			},
+			dir: func(f *os.File) error {
+				fi, err := f.Stat()
+				mustNil(t, err)
+				name := "unknown directory"
+				for _, d := range known {
+					if di, err := os.Stat(filepath.Join(log, d)); err == nil && os.SameFile(di, fi) {
+						name = d
+					}
+				}
+				steps = append(steps, "sync dir "+name)
+				return realSync(f)
+			},
+		})
+		mustNil(t, s.SetHead(3, l.root(t, 3)))
+		want := []string{"sync dir tile/8/0/000.p", "sync dir tile/8/0", "sync dir tile/8",
+			"sync dir tile", "sync dir .", "sync file", "rename head", "sync dir ."}
+		if !slices.Equal(steps, want) {
+			t.Fatalf("got %q, want %q", steps, want)
+		}
+		if !slices.Equal(partialFiles(t, dir), []string{"3"}) {
+			t.Fatalf("files after SetHead: %v", partialFiles(t, dir))
 		}
 	})
 }
@@ -1104,14 +1128,19 @@ func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
 	}
 }
 
-// At most one partial file stays for a tile after a write of the tile, and after
-// an Open that reads the tile.
+// At most one partial file stays for a tile. This holds after a write of the
+// tile and the tree head. It holds after an Open that reads the tile too.
+// WriteTile alone deletes no file: SetHead deletes the narrower file.
 func TestTU07OnePartialFileStaysAfterWriteAndAfterOpenThatReadsTheTile(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
 	l.put(t, s, 3, 5)
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files after WriteTile: %v", names)
+	}
+	mustNil(t, s.SetHead(5, l.root(t, 5)))
 	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
 		t.Fatalf("files after the write: %v", names)
 	}
@@ -1146,7 +1175,7 @@ func TestTU07DirectoryWithTooManyNamesIsAnError(t *testing.T) {
 	}
 }
 
-// Open and WriteTile delete the temporary file of a full tile, which is in the
+// Open and SetHead delete the temporary file of a full tile, which is in the
 // level directory.
 func TestTU07TidyDeletesTemporaryFileOfFullTile(t *testing.T) {
 	state, dir := committedLog(t, 3) // Open reads tile 0
@@ -1158,10 +1187,9 @@ func TestTU07TidyDeletesTemporaryFileOfFullTile(t *testing.T) {
 	}
 	var l testLog
 	l.extend(t, 258)
-	next := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 2}
 	tmp := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: 1, W: fullWidth}.Path()+tmpSuffix)
 	mustNil(t, os.WriteFile(tmp, []byte("x"), fileMode))
-	mustNil(t, s.WriteTile(next, l.tileData(next)))
+	l.commit(t, s, 3, 258)
 	if _, err := os.Lstat(tmp); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("write: the temporary file stays: %v", err)
 	}
@@ -1264,6 +1292,65 @@ func TestTU07OpenDeletesNarrowerPartialFile(t *testing.T) {
 	}
 }
 
+// staleNarrowLog makes a log with a narrower partial file that Open deletes.
+// The head covers 3 hashes. The files of tile 0 have widths 3 and 5.
+func staleNarrowLog(t *testing.T) (*os.Root, string) {
+	t.Helper()
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	s.Close()
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files before Open: %v", names)
+	}
+	return state, dir
+}
+
+// T-U-07: Open deletes a stale file, and then calls fsync on its directory.
+// The fsync of that directory before the delete does not count.
+func TestTU07OpenSyncsTheDirectoryAfterTheDelete(t *testing.T) {
+	state, dir := staleNarrowLog(t)
+	stale := filepath.Join(dir, "tlog", "tile/8/0/000.p/3")
+	var steps []string
+	setHooks(t, hooks{dir: func(f *os.File) error {
+		if strings.HasSuffix(filepath.Clean(f.Name()), "tile/8/0/000.p") {
+			state := "gone"
+			if _, err := os.Lstat(stale); err == nil {
+				state = "there"
+			}
+			steps = append(steps, "sync tile directory, stale file "+state)
+		}
+		return realSync(f)
+	}})
+	openStore(t, state)
+	want := []string{"sync tile directory, stale file there", "sync tile directory, stale file gone"}
+	if !slices.Equal(steps, want) {
+		t.Fatalf("steps %q, want %q", steps, want)
+	}
+}
+
+// T-U-07: a failed delete in Open gives an error. The files stay.
+func TestTU07OpenFailedDeleteIsAnError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can delete a file in a directory with no write bit")
+	}
+	state, dir := staleNarrowLog(t)
+	partial := filepath.Join(dir, "tlog", "tile/8/0/000.p")
+	mustNil(t, os.Chmod(partial, 0o500))
+	t.Cleanup(func() { os.Chmod(partial, dirMode) })
+	_, err := Open(state, "tlog")
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleWrite || e.Name != "tile/8/0/000.p/3" {
+		t.Fatalf("got %v, want the rule %q for the stale file", err, ruleWrite)
+	}
+	mustNil(t, os.Chmod(partial, dirMode))
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files after the failed Open: %v", names)
+	}
+}
+
 // Open tidies the tiles beyond the head in two partial directories that share
 // their parents. It calls fsync on each of these directories one time.
 func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
@@ -1309,6 +1396,7 @@ func TestTU07WriteDeletesLeftoverFilesOfTheTile(t *testing.T) {
 	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()+tmpSuffix), []byte("x"), fileMode))
 	full := tlog.Tile{H: TileHeight, L: 0, N: 0, W: fullWidth}
 	mustNil(t, s.WriteTile(full, l.tileData(full)))
+	mustNil(t, s.SetHead(600, l.root(t, 600))) // SetHead deletes the files
 	if names := partialFiles(t, dir); len(names) != 0 {
 		t.Fatalf("files after the write: %v", names)
 	}
@@ -1629,4 +1717,322 @@ func TestTS13HeadRenameErrorAfterRenameIsMarked(t *testing.T) {
 			t.Fatalf("got %v, want the plain error", err)
 		}
 	})
+}
+
+// T-U-07: the fsync of a tile directory fails. Then SetHead returns an error
+// that does not match ErrHeadOnDisk. It writes no head file. The store forgets
+// the directories that it synced. So the next SetHead syncs the tile directory
+// and each parent again.
+func TestTU07FailedTileDirectorySyncForgetsTheSyncedDirectories(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	if len(s.synced) == 0 {
+		t.Fatal("the store keeps no synced directory after a batch")
+	}
+	l.put(t, s, 3, 4)
+	fail, syncs := true, 0
+	setHooks(t, hooks{dir: func(f *os.File) error {
+		syncs++
+		if fail {
+			return errors.New("injected")
+		}
+		return realSync(f)
+	}})
+	err := s.SetHead(4, l.root(t, 4))
+	if err == nil || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("got %v, want an error that is not marked", err)
+	}
+	if size, _ := diskHead(t, dir); size != 3 {
+		t.Fatalf("head on disk has size %d, want 3", size)
+	}
+	if len(s.synced) != 0 {
+		t.Fatalf("the store keeps %d synced directories after the failed fsync", len(s.synced))
+	}
+	fail, syncs = false, 0
+	mustNil(t, s.SetHead(4, l.root(t, 4)))
+	// The tile directory, its 4 parents, and the log directory for the head.
+	if syncs != 6 {
+		t.Fatalf("the retry synced directories %d times, want 6", syncs)
+	}
+}
+
+// T-U-07: a stale file of width 5 is in drop after a write of width 6. A second
+// write of the same tile has width 5 and other hashes beyond the head. It
+// renames a new file over that name. SetHead must keep the new file.
+func TestTU07SecondWriteOfATileOverAFileInDropKeepsTheNewFile(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5) // a crash leaves a file of width 5 beyond the head
+	s.Close()
+	s = openStore(t, state)
+	second, third := l.fork(t, 3, "second"), l.fork(t, 3, "third")
+	second.extend(t, 6)
+	third.extend(t, 5)
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 6}
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	mustNil(t, s.WriteTile(wide, second.tileData(wide)))
+	mustNil(t, s.WriteTile(narrow, third.tileData(narrow)))
+	mustNil(t, s.SetHead(5, third.root(t, 5)))
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
+		t.Fatalf("files after SetHead: %v, want only the new file of width 5", names)
+	}
+	s.Close()
+	s = openStore(t, state)
+	if size, root := s.TreeHead(); size != 5 || root != third.root(t, 5) {
+		t.Fatalf("after reopen: size %d, root %x", size, root)
+	}
+}
+
+// T-U-07: a SetHead that a check refuses keeps the recorded directories and
+// files. The next SetHead that works acts on them, and the result is the same
+// as with no refused call.
+func TestTU07RefusedSetHeadLeavesTheBatchForTheNextCall(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	var e *Error
+	if err := s.SetHead(5, tlog.Hash{1}); !errors.As(err, &e) || e.Rule != ruleRoot {
+		t.Fatalf("got %v, want the rule %q", err, ruleRoot)
+	}
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files after the refused call: %v", names)
+	}
+	mustNil(t, s.SetHead(5, l.root(t, 5)))
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
+		t.Fatalf("files after the next call: %v", names)
+	}
+	if len(s.drop)+len(s.dirty) != 0 {
+		t.Fatalf("the batch stays: %v %v", s.drop, s.dirty)
+	}
+}
+
+// recordDeleteSteps records each fsync of a directory in dirs. Each record has
+// the files in files that are still there. It records the head rename too. A
+// name in dirs is a path below the log directory. The test restores the earlier
+// calls when it ends.
+func recordDeleteSteps(t *testing.T, log string, dirs, files []string) *[]string {
+	t.Helper()
+	var steps []string
+	setHooks(t, hooks{
+		dir: func(f *os.File) error {
+			name := filepath.Clean(f.Name())
+			for _, d := range dirs {
+				if !strings.HasSuffix(name, "/"+d) {
+					continue
+				}
+				state := ""
+				for _, file := range files {
+					if _, err := os.Lstat(filepath.Join(log, file)); err == nil {
+						state += " " + file
+					}
+				}
+				steps = append(steps, "sync "+d+":"+state)
+				break
+			}
+			return realSync(f)
+		},
+		rename: func(r *os.Root, from, to string) error {
+			if to == headName {
+				steps = append(steps, "head")
+			}
+			return realRename(r, from, to)
+		},
+	})
+	return &steps
+}
+
+// checkDeletesDurable checks the last fsync of each directory in dirs before
+// the head rename. It must come after the deletes, so no file is there.
+func checkDeletesDurable(t *testing.T, steps []string, dirs []string) {
+	t.Helper()
+	head := slices.Index(steps, "head")
+	if head < 0 {
+		t.Fatalf("steps %q: no head rename", steps)
+	}
+	for _, d := range dirs {
+		last := ""
+		for _, s := range steps[:head] {
+			if strings.HasPrefix(s, "sync "+d+":") {
+				last = s
+			}
+		}
+		if last != "sync "+d+":" {
+			t.Errorf("steps %q: want an fsync of %s after the deletes, before the head", steps, d)
+		}
+	}
+}
+
+// T-U-07: a later WriteTile of a tile makes another file the kept file. A file
+// that an earlier call put in drop can differ from it. Its delete must be
+// durable before the head file. The first sequence has a wider partial file and
+// a full tile. The second has a leftover partial file, and the kept file
+// replaces a full tile.
+func TestTU07LaterWriteOfATileMakesTheEarlierDeletesDurable(t *testing.T) {
+	const partial, level = "tile/8/0/000.p", "tile/8/0"
+	tile := func(w int) tlog.Tile { return tlog.Tile{H: TileHeight, L: 0, N: 0, W: w} }
+	t.Run("wider partial and full tile", func(t *testing.T) {
+		state, dir := newLogState(t)
+		log := filepath.Join(dir, "tlog")
+		s := openStore(t, state)
+		var base testLog
+		base.commit(t, s, 0, 3)
+		base.extend(t, 9)
+		other := base.fork(t, 3, "other")
+		other.extend(t, 256)
+		mustNil(t, os.WriteFile(filepath.Join(log, tile(9).Path()), base.tileData(tile(9)), fileMode))
+		mustNil(t, os.WriteFile(filepath.Join(log, tile(fullWidth).Path()), other.tileData(tile(fullWidth)), fileMode))
+		third := base.fork(t, 5, "third")
+		third.extend(t, 7)
+		mustNil(t, s.WriteTile(tile(5), base.tileData(tile(5))))
+		mustNil(t, s.WriteTile(tile(7), third.tileData(tile(7))))
+		steps := recordDeleteSteps(t, log, []string{partial, level},
+			[]string{partial + "/3", partial + "/9", tile(fullWidth).Path()})
+		mustNil(t, s.SetHead(7, third.root(t, 7)))
+		checkDeletesDurable(t, *steps, []string{partial, level})
+	})
+	t.Run("leftover partial file and full tile", func(t *testing.T) {
+		state, dir := newLogState(t)
+		log := filepath.Join(dir, "tlog")
+		s := openStore(t, state)
+		var base testLog
+		base.commit(t, s, 0, 3)
+		base.extend(t, 256)
+		other := base.fork(t, 3, "other")
+		other.extend(t, 4)
+		mustNil(t, os.WriteFile(filepath.Join(log, tile(5).Path()), base.tileData(tile(5)), fileMode))
+		mustNil(t, s.WriteTile(tile(fullWidth), base.tileData(tile(fullWidth))))
+		mustNil(t, s.WriteTile(tile(4), other.tileData(tile(4))))
+		steps := recordDeleteSteps(t, log, []string{partial, level},
+			[]string{partial + "/3", partial + "/5", tile(fullWidth).Path()})
+		mustNil(t, s.SetHead(4, other.root(t, 4)))
+		checkDeletesDurable(t, *steps, []string{partial, level})
+	})
+}
+
+// T-U-07: a batch fills a tile. The partial file of the tile is deleted, and
+// then the fsync of its directory comes before the head file. Open does not
+// read or tidy a full tile, so a partial file that came back would stay.
+func TestTU07FilledTileDeletesThePartialFileDurably(t *testing.T) {
+	const partial = "tile/8/0/000.p"
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 255)
+	l.put(t, s, 255, 257)
+	steps := recordDeleteSteps(t, filepath.Join(dir, "tlog"), []string{partial}, []string{partial + "/255"})
+	mustNil(t, s.SetHead(257, l.root(t, 257)))
+	checkDeletesDurable(t, *steps, []string{partial})
+}
+
+// T-U-07: drop holds each name one time. A write of a tile that the head covers
+// adds no name. Many writes of one tile keep drop at the same size.
+func TestTU07RepeatedAndCoveredWritesKeepDropAtTheBound(t *testing.T) {
+	withoutSync(t)
+	state, _ := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.extend(t, 5)
+	covered := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	for range 10000 {
+		mustNil(t, s.WriteTile(covered, l.tileData(covered)))
+	}
+	if len(s.drop) != 0 {
+		t.Fatalf("covered writes put %d names in drop", len(s.drop))
+	}
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	mustNil(t, s.WriteTile(wide, l.tileData(wide)))
+	first := len(s.drop)
+	for range 2000 {
+		mustNil(t, s.WriteTile(wide, l.tileData(wide)))
+	}
+	if first == 0 || len(s.drop) != first || len(s.drop) > maxPartialNames+2 {
+		t.Fatalf("drop holds %d names after the first write and %d after 2000", first, len(s.drop))
+	}
+}
+
+// T-U-07: a WriteTile of a tile that the head covers deletes a stale file and
+// calls fsync on its directory. That fsync fails. Then the store forgets its
+// synced directories.
+func TestTU07FailedSyncOfACoveredWriteForgetsTheSyncedDirectories(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.commit(t, s, 3, 5)
+	if len(s.synced) == 0 {
+		t.Fatal("the store keeps no synced directory after a batch")
+	}
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), l.tileData(narrow), fileMode))
+	setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
+	covered := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 4}
+	if err := s.WriteTile(covered, l.tileData(covered)); err == nil {
+		t.Fatal("WriteTile returned nil after the failed fsync")
+	}
+	if len(s.synced) != 0 {
+		t.Fatalf("the store keeps %d synced directories", len(s.synced))
+	}
+}
+
+// T-U-07: the rename of the head file fails. The store forgets its synced
+// directories, so the next batch syncs the tile directory and each parent.
+func TestTU07FailedHeadWriteForgetsTheSyncedDirectories(t *testing.T) {
+	state, _ := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 4)
+	restore := setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
+		if to == headName {
+			return errors.New("injected")
+		}
+		return realRename(r, from, to)
+	}})
+	if err := s.SetHead(4, l.root(t, 4)); !errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("got %v, want a marked error", err)
+	}
+	restore()
+	if len(s.synced) != 0 {
+		t.Fatalf("the store keeps %d synced directories", len(s.synced))
+	}
+	syncs := 0
+	setHooks(t, hooks{dir: func(f *os.File) error { syncs++; return realSync(f) }})
+	l.put(t, s, 4, 5)
+	mustNil(t, s.SetHead(5, l.root(t, 5)))
+	// The tile directory, its 4 parents, and the log directory for the head.
+	if syncs != 6 {
+		t.Fatalf("the next batch synced directories %d times, want 6", syncs)
+	}
+}
+
+// T-U-07: the store keeps only the directories of the last batch and their
+// parents. A later batch in other directories drops the earlier ones, so the
+// set does not grow with the log.
+func TestTU07SyncedDirectoriesAreOnlyThoseOfTheLastBatch(t *testing.T) {
+	state, _ := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	want := []string{".", "tile", "tile/8", "tile/8/0", "tile/8/0/000.p"}
+	if got := slices.Sorted(maps.Keys(s.synced)); !slices.Equal(got, want) {
+		t.Fatalf("after the first batch: %q, want %q", got, want)
+	}
+	// This batch fills tile 0 and starts tile 1 and the first tile of level 1.
+	l.commit(t, s, 3, 300)
+	if !s.synced["tile/8/1/000.p"] || s.synced["tile/8/0/000.p"] {
+		t.Fatalf("after the second batch: %q", slices.Sorted(maps.Keys(s.synced)))
+	}
+	// One more leaf changes only the partial tile 1.
+	l.commit(t, s, 300, 301)
+	want = []string{".", "tile", "tile/8", "tile/8/0", "tile/8/0/001.p"}
+	if got := slices.Sorted(maps.Keys(s.synced)); !slices.Equal(got, want) {
+		t.Fatalf("after the third batch: %q, want %q", got, want)
+	}
 }

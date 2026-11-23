@@ -104,6 +104,11 @@ const (
 // stays far below maxSize.
 func benchLog(b *testing.B) *Log {
 	withoutSync(b)
+	return openBenchLog(b)
+}
+
+// openBenchLog is benchLog with the fsync calls that the caller has set.
+func openBenchLog(b *testing.B) *Log {
 	dir := filepath.Join(b.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		b.Fatal(err)
@@ -136,6 +141,32 @@ func BenchmarkAppend(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// BenchmarkAppendFsync measures one Append for each iteration with the real
+// fsync calls on. The log is in b.TempDir(). It reports the fsync calls of
+// files, of directories, and the sum, for each iteration. The log has
+// appendBenchLeaves leaves before the timed calls. The setup counts no call.
+func BenchmarkAppendFsync(b *testing.B) {
+	l := openBenchLog(b)
+	var files, dirs int
+	setHooks(b, hooks{
+		file: func(f *os.File) error { files++; return realSync(f) },
+		dir:  func(f *os.File) error { dirs++; return realSync(f) },
+	})
+	h := testEvent(appendBenchLeaves)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := l.Append(h); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	n := float64(b.N)
+	b.ReportMetric(float64(files)/n, "file-fsync/op")
+	b.ReportMetric(float64(dirs)/n, "dir-fsync/op")
+	b.ReportMetric(float64(files+dirs)/n, "fsync/op")
 }
 
 // BenchmarkAppendBatch measures one AppendBatch of appendBenchBatch hashes for
