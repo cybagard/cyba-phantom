@@ -484,8 +484,7 @@ func TestTI07MarkerCloseFails(t *testing.T) {
 }
 
 // T-I-07: a failed sync of the state directory, after the marker file is made,
-// is an error. This test replaces the test of a failed open of the directory.
-// SyncDir now does that open. A hook error fails its step.
+// is an error. A hook error fails its step.
 func TestTI07MarkerDirectorySyncFailsAfterMarkerFile(t *testing.T) {
 	errSync := errors.New("sync failed")
 	ran := 0
@@ -551,10 +550,10 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 type stopSignal struct{}
 
 // stopAt sets a Step hook that panics with stopSignal once, before the step.
-// It returns a function that is true when the hook ran. The store callers do
-// not stop at seam.Crash. newDatabase calls drop on each error of a sync.
+// It returns a function that gives true when the hook ran. The store callers
+// do not stop at seam.Crash. newDatabase calls drop on each error of a sync.
 // makeMarker closes the file after a failed sync. So the tests use a panic.
-// It stops the call with no file cleanup, but deferred calls still run. One
+// The panic stops the call with no file cleanup. Deferred calls still run. One
 // example is the deferred close of the directory in Open.
 func stopAt(t *testing.T, step string) (ran func() bool) {
 	t.Helper()

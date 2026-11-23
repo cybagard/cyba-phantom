@@ -24,7 +24,8 @@ func CloseFile(f *os.File, name string) error {
 	closed := false
 	defer func() {
 		if !closed {
-			// The hook stopped the step, or it panicked. Close f here.
+			// The Step hook failed the step, gave seam.Crash, or panicked.
+			// Close f here.
 			_ = f.Close()
 		}
 	}()

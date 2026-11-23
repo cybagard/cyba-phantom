@@ -182,7 +182,7 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 // database, not the state directory. The Step hook gets the name "." for both.
 // So the hook at "sync" removes the read mode of the state directory. SyncDir
 // opens its directory before the "dirsync" hook runs. An open of the state
-// directory itself then fails with EACCES, and the path "data" still opens.
+// directory itself then fails with EACCES. The path "data" still opens.
 func TestTS15NewDatabaseSyncsTheDirectoryOfANestedPath(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the mode of the state directory")
