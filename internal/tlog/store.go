@@ -171,14 +171,13 @@ type Store struct {
 	dirty map[string]bool
 
 	// drop holds the stale files that WriteTile found since the last SetHead.
-	// SetHead deletes them after the fsync of dirty. Open leaves at most one
-	// partial file for each tile, so each tile has only a few.
-	drop []string
-
-	// differ holds some files of drop. Each one differs from the kept file of
-	// its tile in a hash of their common width. SetHead deletes them. Then it
-	// calls fsync on their directories, before the head file.
-	differ map[string]bool
+	// SetHead deletes them after the fsync of dirty. Each name is there one
+	// time. A value of true means that the file must be gone, durably, before
+	// the head file. SetHead then calls fsync on its directory. WriteTile adds
+	// names only for a tile with hashes beyond the head. So drop holds at most
+	// maxBatchTiles tiles, and at most maxPartialNames+2 names for each tile.
+	// A write of a tile that the head covers adds no name.
+	drop map[string]bool
 
 	// synced holds the directories that this Store synced since Open. Each one
 	// has all its parents up to the log directory synced too. No sync error
@@ -557,12 +556,13 @@ func readNames(read []tlog.Tile, empty string) string {
 // If an fsync fails, SetHead returns an error and writes no head file. The
 // error does not match ErrHeadOnDisk, and the Store forgets the directories
 // that it synced. Then SetHead deletes the stale files that WriteTile found.
-// A deleted file can differ from the kept file, for example a wider one. Then
-// SetHead calls fsync on its directory. A failed fsync there has the same
-// result. It calls no fsync on the other directories. Then it writes the head
-// file: fsync of the file, rename, and fsync of the log directory. The write
-// can fail at the rename of the head file or after it. Then the head file on
-// disk can hold the new size and root. The Store keeps the old tree head in
+// A deleted file can differ from the final kept file, for example a wider one.
+// A deleted partial file can be beside a full tile that the batch filled. For
+// each of these, SetHead calls fsync on the directory. A failed fsync there has
+// the same result. It calls no fsync on the other directories. Then it writes
+// the head file: fsync of the file, rename, and fsync of the log directory. The
+// write can fail at the rename of the head file or after it. Then the head file
+// on disk can hold the new size and root. The Store keeps the old tree head in
 // memory. The error matches ErrHeadOnDisk, and Log stops on it. The caller must
 // close the Store and open it again.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
@@ -614,9 +614,9 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 		return err
 	}
 	// The new files are durable, so the files that they replace are not the
-	// only copy. Delete them now. A file that differs from the kept file is
-	// durably gone before the head file. Open deletes any other file that a
-	// crash brings back.
+	// only copy. Delete them now. Some deletes get an fsync before the head
+	// file: see unlinkDropped. Open deletes the other files if a crash brings
+	// them back.
 	if err := s.unlinkDropped(); err != nil {
 		return err
 	}
@@ -667,19 +667,26 @@ func (s *Store) syncBatch() error {
 	return nil
 }
 
-// unlinkDropped deletes the files in drop. A file in differ can disagree with
-// the new head, so it must not come back after a crash. After the deletes,
-// unlinkDropped calls fsync on the directory of each file in differ. If a call
-// fails, it clears synced and returns the error. It calls no fsync on the other
-// directories. A narrower file that a crash brings back has the same hashes as
-// the kept file, and Open deletes it.
+// unlinkDropped deletes the files in drop. After the deletes, it calls fsync on
+// the directory of each file with the value true. Two kinds of file have it.
+// The first kind differs from the final kept file of its tile. The second kind
+// is a partial file of a tile that the batch filled. A returned file of the
+// first kind can make Open refuse the log. A returned file of the second kind
+// stays for good, because Open does not read or tidy a full tile. If a call
+// fails, unlinkDropped clears synced and returns the error. It calls no fsync
+// on the other directories. A narrower partial file of a tile that is not full
+// can come back after a crash. It has the same hashes as the kept file. Load
+// deletes it. Verify reads the last tile of each level. Load calls stale for
+// each tile that verify read.
 func (s *Store) unlinkDropped() error {
-	if _, err := s.unlink(s.drop); err != nil {
+	if _, err := s.unlink(slices.Sorted(maps.Keys(s.drop))); err != nil {
 		return err
 	}
 	var dirs []string
-	for name := range s.differ {
-		dirs = append(dirs, path.Dir(name))
+	for name, durable := range s.drop {
+		if durable {
+			dirs = append(dirs, path.Dir(name))
+		}
 	}
 	slices.Sort(dirs)
 	for _, dir := range slices.Compact(dirs) {
@@ -688,7 +695,7 @@ func (s *Store) unlinkDropped() error {
 			return newError(dirName(err, dir), syncRule(err))
 		}
 	}
-	s.drop, s.differ = nil, nil
+	clear(s.drop)
 	return nil
 }
 
@@ -756,7 +763,8 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // Such a file is stale. WriteTile writes the new file first. It does not
 // delete a file. It records the stale files and the narrower partial files.
 // SetHead deletes them after the fsync, so that at most one partial file
-// stays. WriteTile accepts at most maxBatchTiles different tiles
+// stays. If the head covers the tile, WriteTile deletes the stale files at
+// once, as Open does. WriteTile accepts at most maxBatchTiles different tiles
 // with hashes beyond the tree head between two calls of SetHead. WriteTile
 // first checks each directory of the tile path. Each must be a real directory
 // and not a link. This check comes before any write, rename, or delete.
@@ -813,20 +821,29 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		if err := s.writeFile(t.Path(), data); err != nil {
 			return newError(t.Path(), ruleWrite)
 		}
-		// The new file can have the name of a file that an earlier call of this
-		// batch put in drop. It must stay.
-		s.keep(t.Path())
+		// The kept file of the tile is now another file. An earlier call can
+		// have put files of the tile in drop. Each one can differ from the new
+		// file. The new file can also have the name of one of them. It must
+		// stay.
+		s.markDurable(t)
+		delete(s.drop, t.Path())
 		if t.W < w {
 			// The wider files differ beyond the tree head: they are stale.
 			keep = t.W
 		}
 	}
+	if t.W <= c {
+		// The head covers the tile. Delete as Open does, with no list.
+		rm, _, err := s.stale(t, 0, c)
+		if err != nil {
+			return err
+		}
+		return s.remove(rm)
+	}
 	if err := s.queueStale(t, keep); err != nil {
 		return err
 	}
-	if t.W > c {
-		s.written[tileKey(t)] = max(s.written[tileKey(t)], t.W)
-	}
+	s.written[tileKey(t)] = max(s.written[tileKey(t)], t.W)
 	return nil
 }
 
@@ -866,7 +883,7 @@ func (s *Store) partials(t tlog.Tile) (widths []int, tmps []string, err error) {
 		switch {
 		case isTmp:
 			tmps = append(tmps, name)
-		case !slices.Contains(s.drop, tilePath(t, w)):
+		case !s.dropped(tilePath(t, w)):
 			widths = append(widths, w)
 		}
 	}
@@ -885,7 +902,7 @@ type tileFile struct {
 func (s *Store) widest(t tlog.Tile, widths []int) (tileFile, error) {
 	w := fullWidth
 	b, err := s.readFile(tilePath(t, w), w*tlog.HashSize)
-	if slices.Contains(s.drop, tilePath(t, w)) {
+	if s.dropped(tilePath(t, w)) {
 		err = fs.ErrNotExist
 	}
 	if errors.Is(err, fs.ErrNotExist) {
@@ -903,26 +920,38 @@ func (s *Store) widest(t tlog.Tile, widths []int) (tileFile, error) {
 
 // queueStale adds the files that stale returns for tile t to drop. SetHead
 // deletes them after the fsync of the directories of the batch. A file that
-// differs from the kept file also goes to differ.
+// must be gone before the head file gets the value true.
 func (s *Store) queueStale(t tlog.Tile, keep int) error {
-	rm, differ, err := s.stale(t, keep, s.committed(t))
+	rm, durable, err := s.stale(t, keep, s.committed(t))
 	if err != nil {
 		return err
 	}
-	s.drop = append(s.drop, rm...)
-	for _, name := range differ {
-		if s.differ == nil {
-			s.differ = map[string]bool{}
-		}
-		s.differ[name] = true
+	if s.drop == nil {
+		s.drop = map[string]bool{}
+	}
+	for _, name := range rm {
+		s.drop[name] = s.drop[name] || slices.Contains(durable, name)
 	}
 	return nil
 }
 
-// keep removes name from drop and from differ.
-func (s *Store) keep(name string) {
-	s.drop = slices.DeleteFunc(s.drop, func(n string) bool { return n == name })
-	delete(s.differ, name)
+// dropped returns true if name is in drop.
+func (s *Store) dropped(name string) bool {
+	_, ok := s.drop[name]
+	return ok
+}
+
+// markDurable sets the value true for each file of tile t in drop. A later
+// WriteTile of the tile has made another file the kept file. A file that an
+// earlier call checked can differ from it.
+func (s *Store) markDurable(t tlog.Tile) {
+	dir := path.Dir(tilePath(t, 1)) + "/"
+	full := tilePath(t, fullWidth)
+	for name := range s.drop {
+		if strings.HasPrefix(name, dir) || name == full || name == full+tmpSuffix {
+			s.drop[name] = true
+		}
+	}
 }
 
 // markDirty records that SetHead must call fsync on the directory dir.
@@ -943,7 +972,8 @@ func (s *Store) markDirty(dir string) {
 // not, stale returns an error, because the file can be the only copy of covered
 // hashes. stale refuses a link in the result. It deletes nothing. The second
 // result holds some files of the first. Each one differs from the kept file in
-// a hash of their common width.
+// a hash of their common width. If the kept file is a full tile, it holds each
+// partial file.
 func (s *Store) stale(t tlog.Tile, keep, c int) (rm, differ []string, err error) {
 	widths, tmps, err := s.partials(t)
 	if err != nil {
@@ -1008,7 +1038,8 @@ func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) (rm, differ []s
 		rm = append(rm, file)
 		// A file can differ from the kept file in a hash of the common width.
 		// Then it can disagree with the new head, and its delete needs fsync.
-		if m := min(p, w) * tlog.HashSize; !bytes.Equal(b[:m], top[:m]) {
+		// A partial file beside a full tile needs it too: see unlinkDropped.
+		if m := min(p, w) * tlog.HashSize; w == fullWidth || !bytes.Equal(b[:m], top[:m]) {
 			differ = append(differ, file)
 		}
 	}
@@ -1299,16 +1330,15 @@ func fileRule(err error) string {
 	return ruleRead
 }
 
-// writeFile writes name in four steps: a temporary file, fsync of the file,
-// rename, and fsync of the directory. The temporary file is in the same
-// directory. It deletes an old temporary file first. It makes the new one with
-// O_EXCL and mode 0600. The store does not change a mode afterwards. For the
-// head file,
-// the last step is fsync of the log directory. For a tile file, writeFile
-// calls no fsync on a directory. It records the directory, and SetHead syncs
-// it before the head file. Each error after the rename has the type
-// *renamedError. This includes the open or the fsync of a directory. For the
-// head file, each error of the rename has it too.
+// writeFile writes name with a temporary file in the same directory. It
+// deletes an old temporary file first. It makes the new one with O_EXCL and
+// mode 0600. The store does not change a mode afterwards. Then writeFile calls
+// fsync on the file and renames it. For the head file, the last step is fsync
+// on the log directory. For a tile file, writeFile calls no fsync on a
+// directory. It records the directory, and SetHead syncs it before the head
+// file. Each error after the rename has the type *renamedError. This includes
+// the open or the fsync of a directory. For the head file, each error of the
+// rename has it too.
 func (s *Store) writeFile(name string, data []byte) error {
 	dir := path.Dir(name)
 	if err := s.dir.MkdirAll(dir, dirMode); err != nil {

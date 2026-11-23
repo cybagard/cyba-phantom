@@ -693,9 +693,12 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			ref := openTestLog(t, refState)
 			appendTo(t, ref, 0, start+500)
 
-			heads, tileWrites, dirSyncs := 0, 0, 0
+			heads, tileWrites, dirSyncs, fileSyncs := 0, 0, 0, 0
 			beforeHead := map[string]int{} // the fsync calls of each directory
-			restore := setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
+			restore := setHooks(t, hooks{file: func(*os.File) error {
+				fileSyncs++
+				return nil
+			}, rename: func(r *os.Root, from, to string) error {
 				if to == headName {
 					heads++
 				} else {
@@ -720,16 +723,22 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			if want := map[int]int{0: 3, 100: 4}[start]; tileWrites != want {
 				t.Fatalf("AppendBatch wrote %d tiles, want %d", tileWrites, want)
 			}
+			// Each tile write has one fsync of its file, and the head has one.
+			if fileSyncs != tileWrites+heads {
+				t.Fatalf("AppendBatch synced files %d times, want %d", fileSyncs, tileWrites+heads)
+			}
 			// The batch syncs each directory one time before the head file. The
 			// head file has one more sync of the log directory. From 0, the
 			// directories are 3 tile directories and 4 parents. From 100, the
-			// earlier Appends synced two parents, so the batch syncs 5.
+			// earlier Appends synced two parents, so the batch syncs 5. It also
+			// syncs the partial directory after the delete of the partial file
+			// of tile 0, which the batch fills.
 			for dir, n := range beforeHead {
 				if n != 1 {
 					t.Errorf("AppendBatch synced %s %d times before the head, want 1", dir, n)
 				}
 			}
-			if want := map[int]int{0: 8, 100: 6}[start]; dirSyncs != want {
+			if want := map[int]int{0: 8, 100: 7}[start]; dirSyncs != want {
 				t.Fatalf("AppendBatch synced directories %d times, want %d", dirSyncs, want)
 			}
 			size, root := ref.Head()
@@ -1543,14 +1552,15 @@ func TestTU07AppendFsyncCount(t *testing.T) {
 			state, _ := newLogState(t)
 			l := openTestLog(t, state)
 			withoutSync(t)
-			l.AppendBatch(batchOf(0, c.warm))
+			_, err := l.AppendBatch(batchOf(0, c.warm))
+			mustNil(t, err)
 			if !c.warmAfterOpen {
 				l.Close()
 				l = openTestLog(t, state)
 			}
 			files, dirs := countSyncs(t)
-			if _, err := l.Append(testEvent(c.warm)); err != nil {
-				t.Fatal(err)
+			if idx, err := l.Append(testEvent(c.warm)); err != nil || idx != int64(c.warm) {
+				t.Fatalf("Append gave %d, %v, want %d", idx, err, c.warm)
 			}
 			t.Logf("file fsync %d, directory fsync %d", *files, *dirs)
 			if *files != c.files || *dirs != c.dirs {
