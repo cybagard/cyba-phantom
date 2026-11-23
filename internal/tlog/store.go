@@ -180,12 +180,11 @@ type Store struct {
 	drop map[string]bool
 
 	// synced holds the directories that this Store synced since Open. Each one
-	// has all its parents up to the log directory synced too. No sync error
-	// came after it. The set holds only the directories of the last batch that
-	// wrote a tile file, and their parents. So it does not grow with the log.
-	// A failed fsync in syncBatch or in unlinkDropped clears it. A failed head
-	// write clears it too. A failed fsync after the delete of a covered
-	// WriteTile does not clear it.
+	// has all its parents up to the log directory synced too. The set holds
+	// only the directories of the last batch that wrote a tile file, and their
+	// parents. So it does not grow with the log. Each failed directory fsync of
+	// the Store clears it. This includes syncBatch, unlinkDropped, and the
+	// delete of a tile that the head covers. A failed head write clears it too.
 	synced map[string]bool
 }
 
@@ -842,7 +841,11 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		if err != nil {
 			return err
 		}
-		return s.remove(rm)
+		if err := s.remove(rm); err != nil {
+			s.synced = nil
+			return err
+		}
+		return nil
 	}
 	if err := s.queueStale(t, keep); err != nil {
 		return err

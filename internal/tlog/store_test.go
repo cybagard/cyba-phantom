@@ -1957,6 +1957,30 @@ func TestTU07RepeatedAndCoveredWritesKeepDropAtTheBound(t *testing.T) {
 	}
 }
 
+// T-U-07: a WriteTile of a tile that the head covers deletes a stale file and
+// calls fsync on its directory. That fsync fails. Then the store forgets its
+// synced directories.
+func TestTU07FailedSyncOfACoveredWriteForgetsTheSyncedDirectories(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.commit(t, s, 3, 5)
+	if len(s.synced) == 0 {
+		t.Fatal("the store keeps no synced directory after a batch")
+	}
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), l.tileData(narrow), fileMode))
+	setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
+	covered := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 4}
+	if err := s.WriteTile(covered, l.tileData(covered)); err == nil {
+		t.Fatal("WriteTile returned nil after the failed fsync")
+	}
+	if len(s.synced) != 0 {
+		t.Fatalf("the store keeps %d synced directories", len(s.synced))
+	}
+}
+
 // T-U-07: the rename of the head file fails. The store forgets its synced
 // directories, so the next batch syncs the tile directory and each parent.
 func TestTU07FailedHeadWriteForgetsTheSyncedDirectories(t *testing.T) {
