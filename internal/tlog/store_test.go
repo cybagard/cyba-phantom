@@ -1292,6 +1292,65 @@ func TestTU07OpenDeletesNarrowerPartialFile(t *testing.T) {
 	}
 }
 
+// staleNarrowLog makes a log with a narrower partial file that Open deletes.
+// The head covers 3 hashes. The files of tile 0 have widths 3 and 5.
+func staleNarrowLog(t *testing.T) (*os.Root, string) {
+	t.Helper()
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	s.Close()
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files before Open: %v", names)
+	}
+	return state, dir
+}
+
+// T-U-07: Open deletes a stale file, and then calls fsync on its directory.
+// The fsync of that directory before the delete does not count.
+func TestTU07OpenSyncsTheDirectoryAfterTheDelete(t *testing.T) {
+	state, dir := staleNarrowLog(t)
+	stale := filepath.Join(dir, "tlog", "tile/8/0/000.p/3")
+	var steps []string
+	setHooks(t, hooks{dir: func(f *os.File) error {
+		if strings.HasSuffix(filepath.Clean(f.Name()), "tile/8/0/000.p") {
+			state := "gone"
+			if _, err := os.Lstat(stale); err == nil {
+				state = "there"
+			}
+			steps = append(steps, "sync tile directory, stale file "+state)
+		}
+		return realSync(f)
+	}})
+	openStore(t, state)
+	want := []string{"sync tile directory, stale file there", "sync tile directory, stale file gone"}
+	if !slices.Equal(steps, want) {
+		t.Fatalf("steps %q, want %q", steps, want)
+	}
+}
+
+// T-U-07: a failed delete in Open gives an error. The files stay.
+func TestTU07OpenFailedDeleteIsAnError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can delete a file in a directory with no write bit")
+	}
+	state, dir := staleNarrowLog(t)
+	partial := filepath.Join(dir, "tlog", "tile/8/0/000.p")
+	mustNil(t, os.Chmod(partial, 0o500))
+	t.Cleanup(func() { os.Chmod(partial, dirMode) })
+	_, err := Open(state, "tlog")
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleWrite || e.Name != "tile/8/0/000.p/3" {
+		t.Fatalf("got %v, want the rule %q for the stale file", err, ruleWrite)
+	}
+	mustNil(t, os.Chmod(partial, dirMode))
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files after the failed Open: %v", names)
+	}
+}
+
 // Open tidies the tiles beyond the head in two partial directories that share
 // their parents. It calls fsync on each of these directories one time.
 func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
