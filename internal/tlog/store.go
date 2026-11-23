@@ -183,7 +183,9 @@ type Store struct {
 	// has all its parents up to the log directory synced too. No sync error
 	// came after it. The set holds only the directories of the last batch that
 	// wrote a tile file, and their parents. So it does not grow with the log.
-	// A failed fsync of a directory clears it.
+	// A failed fsync in syncBatch or in unlinkDropped clears it. A failed head
+	// write clears it too. A failed fsync after the delete of a covered
+	// WriteTile does not clear it.
 	synced map[string]bool
 }
 
@@ -668,16 +670,18 @@ func (s *Store) syncBatch() error {
 }
 
 // unlinkDropped deletes the files in drop. After the deletes, it calls fsync on
-// the directory of each file with the value true. Two kinds of file have it.
+// the directory of each name with the value true. Two kinds of file need it.
 // The first kind differs from the final kept file of its tile. The second kind
 // is a partial file of a tile that the batch filled. A returned file of the
 // first kind can make Open refuse the log. A returned file of the second kind
-// stays for good, because Open does not read or tidy a full tile. If a call
-// fails, unlinkDropped clears synced and returns the error. It calls no fsync
-// on the other directories. A narrower partial file of a tile that is not full
-// can come back after a crash. It has the same hashes as the kept file. Load
-// deletes it. Verify reads the last tile of each level. Load calls stale for
-// each tile that verify read.
+// stays for good, because Open does not read or tidy a full tile. markDurable
+// also gives the value true to the temporary names of a tile. Such a name can
+// be not on disk. Then the fsync of its directory comes with no delete. If a
+// call fails, unlinkDropped clears synced and returns the error. It calls no
+// fsync on the other directories. A narrower partial file of a tile that is
+// not full can come back after a crash. It has the same hashes as the kept
+// file. Load deletes it. Verify reads the last tile of each level. Load calls
+// stale for each tile that verify read.
 func (s *Store) unlinkDropped() error {
 	if _, err := s.unlink(slices.Sorted(maps.Keys(s.drop))); err != nil {
 		return err
